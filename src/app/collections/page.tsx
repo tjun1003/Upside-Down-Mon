@@ -15,7 +15,7 @@ interface CollectionItem {
 const initialItems: CollectionItem[] = [
   {
     id: '1',
-    name: 'ResNet50 图像分类',
+    name: 'ResNet50 图分类',
     type: 'model',
     description: '基于 ResNet50 的图像分类预训练模型',
     tags: ['PyTorch', 'CNN', '图像分类'],
