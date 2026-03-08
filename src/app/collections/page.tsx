@@ -67,7 +67,7 @@ export default function CollectionsPage() {
         {/* 页面标题 */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-            📚 我的收藏
+            📚 我的收
           </h1>
           <p className="text-gray-600 dark:text-gray-400">
             收藏的模型训练代码和模型
