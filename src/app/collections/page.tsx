@@ -1,6 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import {
+  startTransition,
+  useRef,
+  useState,
+} from 'react'
+
+const SESSION_ID = 'user-session'
 
 // 支持的语言列表
 const LANGUAGES = [
@@ -30,6 +36,28 @@ interface TranslationResult {
   timestamp: string
 }
 
+type StreamPayload =
+  | { type: 'meta'; src_lang: string; src_name: string; confidence: number; tgt_lang: string }
+  | { type: 'token'; text: string }
+  | { type: 'done' }
+
+function getLanguageName(code: string) {
+  return LANGUAGES.find((language) => language.code === code)?.name || code
+}
+
+function createPendingResult(targetLang: string): TranslationResult {
+  return {
+    translation: '',
+    src_lang: '',
+    src_name: '',
+    confidence: 0,
+    tgt_lang: targetLang,
+    tgt_name: getLanguageName(targetLang),
+    session_id: SESSION_ID,
+    timestamp: new Date().toISOString(),
+  }
+}
+
 export default function CollectionsPage() {
   const [inputText, setInputText] = useState('')
   const [targetLang, setTargetLang] = useState('en')
@@ -37,40 +65,131 @@ export default function CollectionsPage() {
   const [result, setResult] = useState<TranslationResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const handleTranslate = async () => {
-    if (!inputText.trim()) {
-      setError('请输入要翻译的文本')
+  const activeControllerRef = useRef<AbortController | null>(null)
+  const requestIdRef = useRef(0)
+
+  const cancelActiveRequest = () => {
+    activeControllerRef.current?.abort()
+    activeControllerRef.current = null
+  }
+
+  const runTranslation = async (message: string) => {
+    const trimmedMessage = message.trim()
+
+    if (!trimmedMessage) {
+      cancelActiveRequest()
+      setIsLoading(false)
+      setResult(null)
+      setError(null)
       return
     }
 
+    const requestId = requestIdRef.current + 1
+    requestIdRef.current = requestId
+
+    cancelActiveRequest()
+    const controller = new AbortController()
+    activeControllerRef.current = controller
+
     setIsLoading(true)
     setError(null)
-    setResult(null)
+
+    startTransition(() => {
+      setResult(createPendingResult(targetLang))
+    })
 
     try {
-      const response = await fetch('/api/translate', {
+      const response = await fetch('/api/translate/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          message: inputText,
+          message: trimmedMessage,
           target_lang: targetLang,
-          session_id: 'user-session',
+          session_id: SESSION_ID,
         }),
+        signal: controller.signal,
       })
 
-      const data = await response.json()
-
       if (!response.ok) {
+        const data = await response.json()
         throw new Error(data.error || '翻译失败')
       }
 
-      setResult(data)
+      if (!response.body) {
+        throw new Error('翻译服务没有返回流式内容')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done || requestId !== requestIdRef.current) {
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split('\n\n')
+        buffer = events.pop() || ''
+
+        for (const event of events) {
+          const dataLine = event
+            .split('\n')
+            .find((line) => line.startsWith('data: '))
+
+          if (!dataLine || requestId !== requestIdRef.current) {
+            continue
+          }
+
+          const payload = JSON.parse(dataLine.slice(6)) as StreamPayload
+
+          if (payload.type === 'meta') {
+            startTransition(() => {
+              setResult((previous) => ({
+                translation: previous?.translation || '',
+                src_lang: payload.src_lang,
+                src_name: payload.src_name,
+                confidence: payload.confidence,
+                tgt_lang: payload.tgt_lang,
+                tgt_name: getLanguageName(payload.tgt_lang),
+                session_id: SESSION_ID,
+                timestamp: previous?.timestamp || new Date().toISOString(),
+              }))
+            })
+          }
+
+          if (payload.type === 'token') {
+            startTransition(() => {
+              setResult((previous) => ({
+                translation: `${previous?.translation || ''}${payload.text}`,
+                src_lang: previous?.src_lang || '',
+                src_name: previous?.src_name || '',
+                confidence: previous?.confidence || 0,
+                tgt_lang: previous?.tgt_lang || targetLang,
+                tgt_name: previous?.tgt_name || getLanguageName(targetLang),
+                session_id: SESSION_ID,
+                timestamp: previous?.timestamp || new Date().toISOString(),
+              }))
+            })
+          }
+        }
+      }
+
     } catch (err) {
+      if (controller.signal.aborted || requestId !== requestIdRef.current) {
+        return
+      }
+
+      setResult(null)
       setError(err instanceof Error ? err.message : '翻译服务出错，请稍后重试')
     } finally {
-      setIsLoading(false)
+      if (requestId === requestIdRef.current) {
+        activeControllerRef.current = null
+        setIsLoading(false)
+      }
     }
   }
 
@@ -126,26 +245,28 @@ export default function CollectionsPage() {
             </select>
           </div>
 
-          {/* 翻译按钮 */}
-          <button
-            onClick={handleTranslate}
-            disabled={isLoading || !inputText.trim()}
-            className="w-full sm:w-auto px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400
+          {/* 操作按钮 */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <button
+              onClick={() => void runTranslation(inputText)}
+              disabled={isLoading || !inputText.trim()}
+              className="w-full sm:w-auto px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400
                      text-white font-medium rounded-lg transition-colors
                      flex items-center justify-center gap-2"
-          >
-            {isLoading ? (
-              <>
-                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                翻译中...
-              </>
-            ) : (
-              '翻译'
-            )}
-          </button>
+            >
+              {isLoading ? (
+                <>
+                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  翻译中...
+                </>
+              ) : (
+                '翻译'
+              )}
+            </button>
+          </div>
         </div>
 
         {/* 错误提示 */}
@@ -160,7 +281,7 @@ export default function CollectionsPage() {
           <div className="mt-6 bg-white dark:bg-gray-800 rounded-xl p-6 shadow-sm border border-gray-200 dark:border-gray-700">
             <div className="flex items-center gap-2 mb-4">
               <span className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-full">
-                {result.src_name} → {result.tgt_name}
+                {(result.src_name || '检测中')} → {result.tgt_name}
               </span>
               <span className="text-sm text-gray-500 dark:text-gray-400">
                 置信度: {(result.confidence * 100).toFixed(1)}%
@@ -168,7 +289,7 @@ export default function CollectionsPage() {
             </div>
             <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
               <p className="text-lg text-gray-900 dark:text-white whitespace-pre-wrap">
-                {result.translation}
+                {result.translation || '正在生成翻译...'}
               </p>
             </div>
           </div>

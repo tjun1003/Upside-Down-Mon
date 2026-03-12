@@ -24,6 +24,8 @@ import os
 import json
 import asyncio
 import logging
+from collections import OrderedDict
+from threading import Thread
 from typing import Optional, List, AsyncGenerator, Dict, Any
 from datetime import datetime
 from dotenv import load_dotenv
@@ -34,10 +36,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema import HumanMessage, AIMessage
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.messages import HumanMessage, AIMessage
 from langdetect import detect, DetectorFactory
-from huggingface_hub import InferenceClient
+# Note: transformers and torch are loaded dynamically in TranslationEngine
 
 load_dotenv()
 DetectorFactory.seed = 42  # deterministic language detection
@@ -45,6 +47,57 @@ DetectorFactory.seed = 42  # deterministic language detection
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+USE_KB = os.getenv("USE_KB", "0") == "1"
+MAX_TRANSLATION_TOKENS = int(os.getenv("MAX_TRANSLATION_TOKENS", "96"))
+STREAM_CHUNK_DELAY = float(os.getenv("STREAM_CHUNK_DELAY", "0.01"))
+TRANSLATION_CACHE_SIZE = int(os.getenv("TRANSLATION_CACHE_SIZE", "128"))
+MODEL_QUANTIZATION = os.getenv("MODEL_QUANTIZATION", "dynamic").lower()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 0. Model Cache Helper
+# ═══════════════════════════════════════════════════════════════════
+
+def check_model_cache(model_name: str) -> bool:
+    """
+    Check if a HuggingFace model is already cached locally.
+    Returns True if cached, False otherwise.
+    """
+    import os
+    from pathlib import Path
+    
+    # HuggingFace cache directory
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    
+    # Model folder name format: models--{org}--{model}
+    model_folder = "models--" + model_name.replace("/", "--")
+    model_path = cache_dir / model_folder
+    
+    if model_path.exists():
+        # Calculate size
+        total_size = sum(f.stat().st_size for f in model_path.rglob("*") if f.is_file())
+        size_str = f"{total_size / (1024**3):.2f} GB" if total_size > 1024**3 else f"{total_size / (1024**2):.0f} MB"
+        logger.info(f"✅ Cache found: {model_name} ({size_str})")
+        return True
+    else:
+        logger.info(f"⏳ Will download: {model_name}")
+        return False
+
+
+def log_cache_status():
+    """Log cache status for all models used in this app."""
+    logger.info("═" * 50)
+    logger.info("📦 Checking model cache...")
+    
+    models = [
+        "sail/Sailor2-1B-Chat",
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+    ]
+    
+    cached = sum(1 for m in models if check_model_cache(m))
+    logger.info(f"📊 {cached}/{len(models)} models cached")
+    logger.info("═" * 50)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -72,21 +125,12 @@ LANG_NAMES = {
     "ko": "Korean",
 }
 
-# HuggingFace model IDs for each language pair (cloud inference)
-SEA_HF_MODELS = {
-    # General SEA — best all-rounder (8B fits free HF API)
-    "default":    "sail/Sailor2-8B-Chat",
-    # Thai specialist
-    "th":         "scb10x/typhoon2-qwen2.5-7b-instruct",
-    # Vietnamese specialist
-    "vi":         "vilm/vinallama-7b-chat",
-    # Indonesian / Malay specialist
-    "id":         "sail/Sailor2-8B-Chat",
-    "ms":         "sail/Sailor2-8B-Chat",
-    # Broad SEA (low-resource languages)
-    "my":         "aisingapore/Qwen-SEA-LION-v4-32B-IT",
-    "km":         "aisingapore/Qwen-SEA-LION-v4-32B-IT",
-    "lo":         "aisingapore/Qwen-SEA-LION-v4-32B-IT",
+# Local Sailor2 models for SEA languages
+# Sailor2 excels at Southeast Asian languages
+LOCAL_MODELS = {
+    # Use 1B for CPU, 8B for GPU (set USE_LARGE_MODEL=1 in .env)
+    "small": "sail/Sailor2-1B-Chat",   # ~2GB VRAM / CPU friendly
+    "large": "sail/Sailor2-8B-Chat",   # ~16GB VRAM
 }
 
 
@@ -128,59 +172,194 @@ CHAT_PROMPTS = {
     # ChatML format (Sailor2, SEA-LION, Typhoon)
     "chatml": (
         "<|im_start|>system\n"
-        "You are an expert multilingual translator specializing in Southeast Asian languages. "
-        "Translate the given text from {src_name} to {tgt_name} accurately and naturally. "
-        "Preserve tone, formality, and cultural nuance. "
-        "Output ONLY the translation — no explanations, no notes.\n"
+        "You are a professional translator. Translate the given {src_name} text into formal, standard {tgt_name}. "
+        "Always use proper grammar, punctuation, and formal register regardless of the style of the input. "
+        "Output ONLY the translated text with no explanations, notes, or extra content.\n"
         "<|im_end|>\n"
-        "<|im_start|>user\n{text}\n<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Translate the following {src_name} text into formal {tgt_name}:\n\n{text}\n"
+        "<|im_end|>\n"
         "<|im_start|>assistant\n"
     ),
     # LLaMA format (Sahabat-AI, VinaLLaMA)
     "llama": (
         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-        "You are an expert {src_name}–{tgt_name} translator. "
+        "You are a professional {src_name}–{tgt_name} translator. "
+        "Always produce formal, grammatically correct {tgt_name} regardless of the register of the source text. "
         "Output only the translation, no explanation.\n"
         "<|eot_id|><|start_header_id|>user<|end_header_id|>\n"
         "{text}\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+    ),
+    # Mistral format
+    "mistral": (
+        "<s>[INST] You are a professional multilingual translator. "
+        "Translate the following text from {src_name} to {tgt_name} using formal, standard language. "
+        "Always use proper grammar and formal register regardless of how the source text is written. "
+        "Output ONLY the translation, nothing else.\n\n"
+        "{text} [/INST]"
     ),
 }
 
 
 class TranslationEngine:
     """
-    Translation via HuggingFace Inference API (streaming supported).
-    Falls back to local transformers pipeline if HF_TOKEN is missing.
+    Translation using local Sailor2 model.
+    Sailor2 is optimized for Southeast Asian languages.
     """
 
     def __init__(self):
-        self.hf_token = os.getenv("HF_TOKEN")
-        self._local_pipe = None
-        if self.hf_token:
-            self.client = InferenceClient(token=self.hf_token)
-            logger.info("✅ Using HuggingFace Inference API (cloud)")
-        else:
-            logger.warning("⚠️  HF_TOKEN not set — falling back to local model")
-            self._load_local()
+        self._tokenizer = None
+        self._model = None
+        self._model_name = None
+        self._device = "cpu"
+        self._quantization = "none"
+        self._cache: OrderedDict[tuple[str, str, str, str], str] = OrderedDict()
+        self._load_local()
 
     def _load_local(self):
-        """Load a small local model as fallback."""
+        """Load Sailor2 model locally."""
         try:
-            from transformers import pipeline
-            self._local_pipe = pipeline(
-                "text-generation",
-                model="sail/Sailor2-1B-Chat",   # 1B — CPU friendly
-                max_new_tokens=512,
-                do_sample=False,
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            
+            # Check if GPU available and if user wants large model
+            use_large = os.getenv("USE_LARGE_MODEL", "0") == "1"
+            has_gpu = torch.cuda.is_available()
+            
+            if use_large and has_gpu:
+                self._model_name = LOCAL_MODELS["large"]
+                logger.info(f"🚀 Loading large model: {self._model_name} (GPU)")
+            else:
+                self._model_name = LOCAL_MODELS["small"]
+                logger.info(f"💻 Loading small model: {self._model_name} (CPU/GPU)")
+            
+            # Determine device
+            self._device = "cuda" if has_gpu else "cpu"
+            logger.info(f"🖥️  Device: {self._device}")
+
+            self._tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token
+
+            model_kwargs: Dict[str, Any] = {}
+            requested_quantization = MODEL_QUANTIZATION
+
+            if has_gpu:
+                if requested_quantization in {"4bit", "8bit"}:
+                    try:
+                        from transformers import BitsAndBytesConfig
+
+                        if requested_quantization == "4bit":
+                            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                                load_in_4bit=True,
+                                bnb_4bit_compute_dtype=torch.float16,
+                                bnb_4bit_use_double_quant=True,
+                                bnb_4bit_quant_type="nf4",
+                            )
+                        else:
+                            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                                load_in_8bit=True,
+                            )
+                        model_kwargs["device_map"] = "auto"
+                        self._quantization = requested_quantization
+                    except Exception as exc:
+                        logger.warning(f"Quantization setup failed, falling back to fp16: {exc}")
+                        model_kwargs["torch_dtype"] = torch.float16
+                        model_kwargs["device_map"] = "auto"
+                        self._quantization = "fp16"
+                else:
+                    model_kwargs["torch_dtype"] = torch.float16
+                    model_kwargs["device_map"] = "auto"
+                    self._quantization = "fp16"
+            else:
+                model_kwargs["torch_dtype"] = torch.float32
+                self._quantization = "none"
+
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self._model_name,
+                **model_kwargs,
             )
-            logger.info("✅ Local Sailor2-1B loaded as fallback")
+
+            if not has_gpu and requested_quantization in {"dynamic", "8bit"}:
+                self._model = torch.quantization.quantize_dynamic(
+                    self._model,
+                    {torch.nn.Linear},
+                    dtype=torch.qint8,
+                )
+                self._quantization = "dynamic-int8"
+
+            if not has_gpu:
+                self._model.to(self._device)
+
+            self._model.eval()
+            logger.info(f"✅ Sailor2 loaded successfully: {self._model_name}")
+            logger.info(f"⚙️ Quantization mode: {self._quantization}")
         except Exception as e:
             logger.error(f"Local model load failed: {e}")
 
+    def _estimate_max_new_tokens(self, text: str) -> int:
+        estimated = max(32, min(MAX_TRANSLATION_TOKENS, len(text) * 2))
+        return estimated
+
+    def _build_generation_kwargs(self, max_new_tokens: int, streamer: Any = None) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": False,
+            "use_cache": True,
+            "pad_token_id": self._tokenizer.pad_token_id if self._tokenizer else None,
+            "eos_token_id": self._tokenizer.eos_token_id if self._tokenizer else None,
+        }
+        if streamer is not None:
+            kwargs["streamer"] = streamer
+        return kwargs
+
+    def _generate_text(self, prompt: str, max_new_tokens: int) -> str:
+        import torch
+
+        if self._tokenizer is None or self._model is None:
+            return "[Translation unavailable — model not loaded]"
+
+        inputs = self._tokenizer(prompt, return_tensors="pt")
+        if self._device == "cpu":
+            inputs = {key: value.to(self._device) for key, value in inputs.items()}
+
+        with torch.inference_mode():
+            output = self._model.generate(
+                **inputs,
+                **self._build_generation_kwargs(max_new_tokens),
+            )
+
+        generated_tokens = output[0][inputs["input_ids"].shape[1]:]
+        return self._tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+    def _clean_translation(self, text: str) -> str:
+        cleaned = text.strip()
+        for stop in ["<|im_end|>", "<|im_start|>", "\n\n\n"]:
+            if stop in cleaned:
+                cleaned = cleaned.split(stop)[0].strip()
+        return cleaned
+
+    def _get_cached_translation(
+        self, text: str, src_lang: str, tgt_lang: str, context: str
+    ) -> Optional[str]:
+        cache_key = (text, src_lang, tgt_lang, context)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self._cache.move_to_end(cache_key)
+        return cached
+
+    def _set_cached_translation(
+        self, text: str, src_lang: str, tgt_lang: str, context: str, translation: str
+    ) -> None:
+        cache_key = (text, src_lang, tgt_lang, context)
+        self._cache[cache_key] = translation
+        self._cache.move_to_end(cache_key)
+        if len(self._cache) > TRANSLATION_CACHE_SIZE:
+            self._cache.popitem(last=False)
+
     def _select_model(self, src_lang: str, tgt_lang: str) -> str:
-        # Pick best model based on target language (most need the target side)
-        return SEA_HF_MODELS.get(tgt_lang,
-               SEA_HF_MODELS.get(src_lang, SEA_HF_MODELS["default"]))
+        # Always use local Sailor2 model
+        return self._model_name or LOCAL_MODELS["small"]
 
     def _build_prompt(self, text: str, src_lang: str, tgt_lang: str,
                       context: str = "", fmt: str = "chatml") -> str:
@@ -195,53 +374,83 @@ class TranslationEngine:
 
     def translate(self, text: str, src_lang: str, tgt_lang: str,
                   context: str = "") -> str:
-        """Blocking translation."""
-        model_id = self._select_model(src_lang, tgt_lang)
-        prompt = self._build_prompt(text, src_lang, tgt_lang, context)
+        """Blocking translation using local Sailor2 model."""
+        cached = self._get_cached_translation(text, src_lang, tgt_lang, context)
+        if cached is not None:
+            return cached
 
-        if self.hf_token:
-            response = self.client.text_generation(
-                prompt,
-                model=model_id,
-                max_new_tokens=512,
-                temperature=0.1,
-                repetition_penalty=1.05,
-                stop_sequences=["<|im_end|>", "<|eot_id|>", "\n\n\n"],
-            )
-            return response.strip()
-        elif self._local_pipe:
-            out = self._local_pipe(prompt, return_full_text=False)
-            return out[0]["generated_text"].strip()
+        prompt = self._build_prompt(text, src_lang, tgt_lang, context, fmt="chatml")
+        max_new_tokens = self._estimate_max_new_tokens(text)
+
+        if self._model and self._tokenizer:
+            try:
+                result = self._clean_translation(
+                    self._generate_text(prompt, max_new_tokens)
+                )
+                self._set_cached_translation(text, src_lang, tgt_lang, context, result)
+                return result
+            except Exception as e:
+                logger.error(f"Translation error: {e}")
+                return f"[Translation error: {str(e)}]"
         else:
-            return f"[Translation unavailable — no model loaded]"
+            return "[Translation unavailable — model not loaded]"
 
     async def translate_stream(
         self, text: str, src_lang: str, tgt_lang: str, context: str = ""
     ) -> AsyncGenerator[str, None]:
-        """Streaming translation via SSE — yields tokens one by one."""
-        model_id = self._select_model(src_lang, tgt_lang)
-        prompt = self._build_prompt(text, src_lang, tgt_lang, context)
-
-        if not self.hf_token:
-            # Fallback: simulate streaming from blocking call
-            result = self.translate(text, src_lang, tgt_lang, context)
-            for word in result.split(" "):
-                yield word + " "
-                await asyncio.sleep(0.03)
+        """True streaming translation using TextIteratorStreamer."""
+        cached = self._get_cached_translation(text, src_lang, tgt_lang, context)
+        if cached is not None:
+            for chunk in cached.split(" "):
+                if chunk:
+                    yield chunk + " "
+                    await asyncio.sleep(STREAM_CHUNK_DELAY)
             return
 
-        # Real streaming from HF API
-        for token in self.client.text_generation(
-            prompt,
-            model=model_id,
-            max_new_tokens=512,
-            temperature=0.1,
-            repetition_penalty=1.05,
-            stream=True,
-            stop_sequences=["<|im_end|>", "<|eot_id|>"],
-        ):
-            yield token
-            await asyncio.sleep(0)  # yield control
+        if self._tokenizer is None or self._model is None:
+            yield "[Translation unavailable — model not loaded]"
+            return
+
+        try:
+            import torch
+            from transformers import TextIteratorStreamer
+
+            prompt = self._build_prompt(text, src_lang, tgt_lang, context, fmt="chatml")
+            max_new_tokens = self._estimate_max_new_tokens(text)
+            inputs = self._tokenizer(prompt, return_tensors="pt")
+            if self._device == "cpu":
+                inputs = {key: value.to(self._device) for key, value in inputs.items()}
+
+            streamer = TextIteratorStreamer(
+                self._tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+
+            generation_thread = Thread(
+                target=self._model.generate,
+                kwargs={
+                    **inputs,
+                    **self._build_generation_kwargs(max_new_tokens, streamer=streamer),
+                },
+                daemon=True,
+            )
+            generation_thread.start()
+
+            chunks: List[str] = []
+            for chunk in streamer:
+                cleaned = self._clean_translation(chunk)
+                if cleaned:
+                    chunks.append(cleaned)
+                    yield cleaned
+                    await asyncio.sleep(STREAM_CHUNK_DELAY)
+
+            final_text = self._clean_translation("".join(chunks))
+            if final_text:
+                self._set_cached_translation(text, src_lang, tgt_lang, context, final_text)
+        except Exception as e:
+            logger.error(f"Streaming translation error: {e}")
+            yield f"[Translation error: {str(e)}]"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -250,28 +459,30 @@ class TranslationEngine:
 
 class ConversationStore:
     """
-    Per-session conversation memory using LangChain's
-    ConversationBufferWindowMemory. Keeps last N turns.
+    Per-session conversation memory using ChatMessageHistory.
+    Keeps last N turns.
     """
 
     def __init__(self, window: int = 10):
-        self._sessions: Dict[str, ConversationBufferWindowMemory] = {}
+        self._sessions: Dict[str, ChatMessageHistory] = {}
         self.window = window
 
-    def get(self, session_id: str) -> ConversationBufferWindowMemory:
+    def get(self, session_id: str) -> ChatMessageHistory:
         if session_id not in self._sessions:
-            self._sessions[session_id] = ConversationBufferWindowMemory(
-                k=self.window, return_messages=True
-            )
+            self._sessions[session_id] = ChatMessageHistory()
         return self._sessions[session_id]
 
     def add(self, session_id: str, human: str, ai: str):
         mem = self.get(session_id)
-        mem.save_context({"input": human}, {"output": ai})
+        mem.add_user_message(human)
+        mem.add_ai_message(ai)
+        # Keep only last N*2 messages (N turns = N human + N ai)
+        if len(mem.messages) > self.window * 2:
+            mem.messages = mem.messages[-(self.window * 2):]
 
     def history(self, session_id: str) -> List[Dict]:
         mem = self.get(session_id)
-        messages = mem.chat_memory.messages
+        messages = mem.messages
         result = []
         for m in messages:
             role = "user" if isinstance(m, HumanMessage) else "assistant"
@@ -301,9 +512,15 @@ class KnowledgeBase:
         self.index_path = index_path
         self.embed_model_id = embed_model
         self._index = None
-        self._setup()
+        self.enabled = USE_KB
+        if self.enabled:
+            self._setup()
+        else:
+            logger.info("ℹ️ Knowledge base disabled (USE_KB=0)")
 
     def _setup(self):
+        if not self.enabled:
+            return
         try:
             from llama_index.core import Settings
             from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -324,6 +541,8 @@ class KnowledgeBase:
         Add documents to the knowledge base.
         docs: [{"text": "...", "metadata": {"lang": "ms", "domain": "..."}}]
         """
+        if not self.enabled:
+            raise RuntimeError("Knowledge base is disabled. Set USE_KB=1 to enable it.")
         from llama_index.core import VectorStoreIndex, Document
         os.makedirs(self.index_path, exist_ok=True)
         llama_docs = [Document(text=d["text"], metadata=d.get("metadata", {}))
@@ -338,7 +557,7 @@ class KnowledgeBase:
 
     def retrieve(self, query: str, top_k: int = 3) -> str:
         """Retrieve relevant context for RAG."""
-        if self._index is None:
+        if not self.enabled or self._index is None:
             return ""
         try:
             retriever = self._index.as_retriever(similarity_top_k=top_k)
@@ -380,7 +599,7 @@ class SEAChatbot:
     ) -> Any:
         """
         Main entry: detect language, retrieve context, translate.
-        Returns full string (stream=False) or async generator (stream=True).
+        Returns dict (stream=False) or async generator (stream=True).
         """
         # 1. Detect source language
         detection = self.detector.detect_with_confidence(message)
@@ -388,13 +607,21 @@ class SEAChatbot:
 
         # If already in target language, no translation needed
         if src_lang == target_lang:
-            reply = f"[Already in {LANG_NAMES.get(target_lang, target_lang)}] {message}"
+            reply = message  # Just return original message
             self.memory.add(session_id, message, reply)
             if stream:
                 async def _passthrough():
                     yield reply
                 return _passthrough()
-            return reply
+            return {
+                "translation": reply,
+                "src_lang":    src_lang,
+                "src_name":    detection["name"],
+                "confidence":  detection["confidence"],
+                "tgt_lang":    target_lang,
+                "tgt_name":    LANG_NAMES.get(target_lang, target_lang),
+                "same_lang":   True,
+            }
 
         # 2. RAG context
         context = self.kb.retrieve(message) if self.kb.ready else ""
@@ -573,8 +800,13 @@ def health():
     return {
         "status":          "ok",
         "active_sessions": chatbot.memory.active_sessions(),
+        "kb_enabled":      chatbot.kb.enabled,
         "kb_ready":        chatbot.kb.ready,
-        "hf_api":          bool(os.getenv("HF_TOKEN")),
+        "model":           chatbot.engine._model_name,
+        "model_loaded":    chatbot.engine._model is not None,
+        "streaming":       True,
+        "quantization":    chatbot.engine._quantization,
+        "max_tokens":      MAX_TRANSLATION_TOKENS,
     }
 
 
@@ -733,9 +965,11 @@ async def whatsapp_webhook(request: Request, background: BackgroundTasks):
 @app.on_event("startup")
 async def on_startup():
     logger.info("🌏 SEA Translation Chatbot starting…")
+    # Check model cache status
+    log_cache_status()
     # Start Telegram bot in background if token provided
     asyncio.create_task(setup_telegram())
 
 
 if __name__ == "__main__":
-    uvicorn.run("chatbot_backend:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("translation:app", host="0.0.0.0", port=8000, reload=True)

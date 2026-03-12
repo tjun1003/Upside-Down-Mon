@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "start:all": "powershell -ExecutionPolicy Bypass -File ./start.ps1"
   },
   "keywords": [],
   "author": "",
