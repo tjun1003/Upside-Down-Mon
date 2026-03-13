@@ -1,19 +1,41 @@
-@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;1,9..144,300&family=DM+Sans:wght@300;400;500&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --ink: #0f1923;
+  --paper: #f5f0e8;
+  --cream: #ede8db;
+  --gold: #c8a84b;
+  --gold-light: #e8d28a;
+  --teal: #1a6b6b;
+  --teal-mid: #2a8a8a;
+  --teal-light: #e0f0ef;
+  --muted: #7a7065;
+  --border: #d4cdc0;
+  --white: #ffffff;
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --radius-sm: 4px;
+  --radius-md: 10px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 4px rgba(15,25,35,0.08);
+  --shadow-md: 0 4px 20px rgba(15,25,35,0.12);
+  --shadow-lg: 0 12px 48px rgba(15,25,35,0.16);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+html { scroll-behavior: smooth; }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-body);
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
+
+::selection { background: var(--gold-light); color: var(--ink); }
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--cream); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
