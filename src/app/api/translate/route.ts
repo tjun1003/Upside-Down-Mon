@@ -1,46 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const TRANSLATION_API_URL = process.env.TRANSLATION_API_URL || 'http://localhost:8000'
-
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json()
-    const { message, target_lang = 'en', session_id = 'default' } = body
-
-    if (!message?.trim()) {
-      return NextResponse.json(
-        { error: 'Message cannot be empty' },
-        { status: 400 }
-      )
-    }
-
-    const response = await fetch(`${TRANSLATION_API_URL}/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        session_id,
-        message,
-        target_lang,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      return NextResponse.json(
-        { error: `Translation service error: ${errorText}` },
-        { status: response.status }
-      )
-    }
-
-    const result = await response.json()
-    return NextResponse.json(result)
-  } catch (error) {
-    console.error('Translation API error:', error)
-    return NextResponse.json(
-      { error: 'Failed to connect to translation service. Make sure the Python backend is running.' },
-      { status: 503 }
-    )
-  }
+  // Streaming-only mode: this non-streaming endpoint is intentionally disabled.
+  await request.json().catch(() => null)
+  return NextResponse.json(
+    { error: 'Non-streaming endpoint is disabled. Use /api/translate/stream.' },
+    { status: 410 }
+  )
 }

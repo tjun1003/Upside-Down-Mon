@@ -24,6 +24,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from threading import Thread
 from typing import Optional, List, AsyncGenerator, Dict, Any
@@ -49,10 +50,18 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 USE_KB = os.getenv("USE_KB", "0") == "1"
-MAX_TRANSLATION_TOKENS = int(os.getenv("MAX_TRANSLATION_TOKENS", "96"))
+# 0 means no hard cap (unlimited at app layer).
+MAX_TRANSLATION_TOKENS = int(os.getenv("MAX_TRANSLATION_TOKENS", "0"))
+ASSISTANT_MAX_NEW_TOKENS = int(os.getenv("ASSISTANT_MAX_NEW_TOKENS", "0"))
+# Soft caps protect against pathological long generations; set 0 to disable.
+SOFT_MAX_TRANSLATION_TOKENS = int(os.getenv("SOFT_MAX_TRANSLATION_TOKENS", "2048"))
+SOFT_MAX_ASSISTANT_TOKENS = int(os.getenv("SOFT_MAX_ASSISTANT_TOKENS", "3072"))
 STREAM_CHUNK_DELAY = float(os.getenv("STREAM_CHUNK_DELAY", "0.01"))
 TRANSLATION_CACHE_SIZE = int(os.getenv("TRANSLATION_CACHE_SIZE", "128"))
 MODEL_QUANTIZATION = os.getenv("MODEL_QUANTIZATION", "dynamic").lower()
+LAZY_LOAD_MODEL = os.getenv("LAZY_LOAD_MODEL", "1") == "1"
+STARTUP_CHECK_CACHE = os.getenv("STARTUP_CHECK_CACHE", "0") == "1"
+UVICORN_RELOAD = os.getenv("UVICORN_RELOAD", "0") == "1"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -64,7 +73,6 @@ def check_model_cache(model_name: str) -> bool:
     Check if a HuggingFace model is already cached locally.
     Returns True if cached, False otherwise.
     """
-    import os
     from pathlib import Path
     
     # HuggingFace cache directory
@@ -125,6 +133,237 @@ LANG_NAMES = {
     "ko": "Korean",
 }
 
+ASSISTANT_RESPONSES = {
+    "greeting": (
+        "Hello. I am doing well, thank you for asking. "
+        "How may I assist you today?"
+    ),
+    "affection": (
+        "Thank you for saying that. That is very kind of you. "
+        "I am here with you. What would you like to talk about next?"
+    ),
+    "subsidy": (
+        "Hospital subsidies are available under the Skim Peduli Kesihatan programme. "
+        "To apply: (1) Register at MySejahtera portal, (2) Upload your IC and income documents, "
+        "(3) Visit any government clinic for assessment. The process takes 5 to 7 working days."
+    ),
+    "scholarship": (
+        "Several scholarships are available: JPA Scholarship (full tuition), MARA Loans "
+        "(low-interest), and State Education Bursaries. Eligibility depends on household "
+        "income and academic results. Which education level is your child in?"
+    ),
+    "housing": (
+        "Affordable housing programmes include PR1MA for middle income, PPR Rental for low "
+        "income, and MyDeposit for first-home buyers. Apply online at ehome.kpkt.gov.my. "
+        "What is your household income range?"
+    ),
+    "legal": (
+        "As a migrant worker you have the right to fair wages, safe working conditions, "
+        "healthcare access, and the right to file complaints with JTKSM. "
+        "Call the Labour Hotline: 1800-88-8088 (free). Would you like this in another language?"
+    ),
+}
+
+SYSTEM_SCOPE_REDIRECT_EN = (
+    "I can only assist with government service topics: public health support, education and scholarships, "
+    "housing assistance, and basic worker/legal rights. "
+    "Please ask a related question so I can help you directly."
+)
+
+DOMAIN_KEYWORDS = [
+    "health", "hospital", "subsidy", "clinic", "医保", "医疗", "医院", "补助", "补贴",
+    "education", "school", "scholarship", "study", "学历", "教育", "奖学金",
+    "housing", "rent", "home", "house", "房屋", "住房", "租房", "买房",
+    "legal", "right", "rights", "contract", "labour", "labor", "worker", "migrant",
+    "法律", "权益", "合同", "工人", "劳工", "勞工", "签证", "簽證",
+]
+
+OFF_TOPIC_KEYWORDS = [
+    "i love you", "i like you", "do you love me", "you love who", "kiss", "date", "girlfriend", "boyfriend",
+    "我爱你", "我愛你", "我喜欢你", "你爱谁", "你愛誰", "谈恋爱", "談戀愛",
+    "cook", "make food", "make me dinner", "做饭", "做飯", "煮饭", "煮飯",
+]
+
+
+def build_assistant_reply(message: str) -> Optional[str]:
+    lower = message.lower()
+    if any(k in lower for k in ["hi", "hello", "hey", "how are you", "你好", "您好", "你好吗", "你還好嗎", "你还好吗"]):
+        return ASSISTANT_RESPONSES["greeting"]
+    if any(k in lower for k in ["i like you", "i love you", "我喜欢你", "我愛你", "我爱你", "saya suka kamu", "aku suka kamu"]):
+        return ASSISTANT_RESPONSES["affection"]
+    if any(k in lower for k in ["subsidi", "hospital", "health"]):
+        return ASSISTANT_RESPONSES["subsidy"]
+    if any(k in lower for k in ["scholarship", "education", "school"]):
+        return ASSISTANT_RESPONSES["scholarship"]
+    if any(k in lower for k in ["hous", "rumah"]):
+        return ASSISTANT_RESPONSES["housing"]
+    if any(k in lower for k in ["legal", "right", "migrant"]):
+        return ASSISTANT_RESPONSES["legal"]
+    return None
+
+
+def resolve_response_lang(detected_lang: str, requested_lang: str) -> str:
+    """
+    Resolve assistant reply language for the current turn.
+    Prefer the language detected from the current user input; fall back to requested language.
+    """
+    if detected_lang in LANG_NAMES:
+        return detected_lang
+    return requested_lang
+
+
+def looks_like_gibberish(text: str) -> bool:
+    """Heuristic detector for random/garbled input."""
+    content = re.sub(r"\s+", "", text)
+    if len(content) < 6:
+        return False
+
+    valid_chars = re.findall(
+        r"[A-Za-z0-9\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\u0E00-\u0E7F\u1000-\u109F\u0E80-\u0EFF\u1780-\u17FF\u0600-\u06FF\u0B80-\u0BFF]",
+        content,
+    )
+    valid_ratio = (len(valid_chars) / len(content)) if content else 1.0
+
+    # Mostly symbols/noise.
+    if valid_ratio < 0.35:
+        return True
+
+    # Repeated random punctuation chunks.
+    if re.search(r"([~!@#$%^&*_=+\\/\\|<>?`.,;:'\"-])\1{4,}", content):
+        return True
+
+    return False
+
+
+def is_off_topic_message(message: str) -> bool:
+    lower = message.lower().strip()
+    if not lower:
+        return False
+
+    if looks_like_gibberish(message):
+        return True
+
+    if any(k in lower for k in DOMAIN_KEYWORDS):
+        return False
+
+    if any(k in lower for k in OFF_TOPIC_KEYWORDS):
+        return True
+
+    # Very short non-domain social prompts are treated as off-topic for this assistant scope.
+    token_count = len(re.findall(r"\w+", lower, flags=re.UNICODE))
+    if token_count <= 4 and not any(k in lower for k in DOMAIN_KEYWORDS):
+        return True
+
+    return False
+
+
+def infer_lang_by_script(text: str) -> Optional[str]:
+    """Infer language from script for short messages where langdetect may be unstable."""
+    if re.search(r"[\uAC00-\uD7AF]", text):
+        return "ko"
+    if re.search(r"[\u3040-\u30FF]", text):
+        return "ja"
+    if re.search(r"[\u0E00-\u0E7F]", text):
+        return "th"
+    if re.search(r"[\u1000-\u109F]", text):
+        return "my"
+    if re.search(r"[\u0E80-\u0EFF]", text):
+        return "lo"
+    if re.search(r"[\u1780-\u17FF]", text):
+        return "km"
+    # Chinese/Japanese share Han characters; if no kana/hangul are present, default to zh.
+    if re.search(r"[\u4E00-\u9FFF]", text):
+        return "zh"
+    return None
+
+
+def sanitize_assistant_output(text: str) -> str:
+    """
+    Remove bilingual/meta tails like "Translation: ..." from assistant output.
+    Keep only the primary conversational reply.
+    """
+    cleaned = text.strip()
+    marker_pattern = re.compile(
+        r"\s*(translation|translated\s*text|翻译|翻譯|terjemahan|explanation|explain|解释|解釋|说明|說明|설명)\s*[:：].*$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = marker_pattern.sub("", cleaned).strip()
+
+    # Remove common "sentence analysis" style continuations in Chinese/English.
+    analysis_pattern = re.compile(
+        r"\s*(意思是|意思為|可以表达为|可以表達為|in\s+other\s+words|this\s+means)\b.*$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = analysis_pattern.sub("", cleaned).strip()
+
+    # Remove common Q/A wrappers so we keep only the direct answer.
+    cleaned = re.sub(r"^\s*(question|问题)\s*[:：].*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE).strip()
+    cleaned = re.sub(r"^\s*(answer|回答|答案)\s*[:：]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Remove markdown formatting markers when model outputs markdown in plain-text channel.
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+    cleaned = re.sub(r"^\s*#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*[-*]\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    # If the response still starts by rephrasing user intent, trim that lead-in.
+    cleaned = re.sub(r"^(你问的是|你是在问|您问的是|you asked|you are asking)[^。.!?\n]*[。.!?]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
+def needs_language_correction(text: str, target_lang: str) -> bool:
+    """
+    Generic hard guard for output language drift.
+    Uses script hints + detector fallback to decide whether to auto-correct.
+    """
+    content = text.strip()
+    if not content:
+        return False
+
+    # Quick script inference for obvious drift.
+    script_lang = infer_lang_by_script(content)
+    if script_lang is not None and script_lang != target_lang:
+        # Allow zh<->ja script overlap to pass; detector handles deeper correction.
+        if {script_lang, target_lang} != {"zh", "ja"}:
+            return True
+
+    latin_count = len(re.findall(r"[A-Za-z]", content))
+    han_count = len(re.findall(r"[\u4E00-\u9FFF]", content))
+    hangul_count = len(re.findall(r"[\uAC00-\uD7AF]", content))
+    kana_count = len(re.findall(r"[\u3040-\u30FF]", content))
+    thai_count = len(re.findall(r"[\u0E00-\u0E7F]", content))
+    myanmar_count = len(re.findall(r"[\u1000-\u109F]", content))
+    lao_count = len(re.findall(r"[\u0E80-\u0EFF]", content))
+    khmer_count = len(re.findall(r"[\u1780-\u17FF]", content))
+    arabic_count = len(re.findall(r"[\u0600-\u06FF]", content))
+    tamil_count = len(re.findall(r"[\u0B80-\u0BFF]", content))
+
+    non_latin_targets = {"zh", "ja", "ko", "th", "my", "lo", "km", "ar", "ta"}
+    if target_lang in non_latin_targets and latin_count >= 24:
+        expected_counts = {
+            "zh": han_count,
+            "ja": han_count + kana_count,
+            "ko": hangul_count,
+            "th": thai_count,
+            "my": myanmar_count,
+            "lo": lao_count,
+            "km": khmer_count,
+            "ar": arabic_count,
+            "ta": tamil_count,
+        }
+        if latin_count > expected_counts.get(target_lang, 0):
+            return True
+
+    detected = LanguageDetector.detect(content)
+    if detected != target_lang:
+        # Allow closely related/overlapping outputs for Malay/Indonesian and zh/ja.
+        if {detected, target_lang} in ({"ms", "id"}, {"zh", "ja"}):
+            return False
+        return True
+    return False
+
 # Local Sailor2 models for SEA languages
 # Sailor2 excels at Southeast Asian languages
 LOCAL_MODELS = {
@@ -140,6 +379,9 @@ class LanguageDetector:
     @staticmethod
     def detect(text: str) -> str:
         """Returns normalised language code e.g. 'ms', 'th', 'en'."""
+        script_lang = infer_lang_by_script(text)
+        if script_lang is not None:
+            return script_lang
         try:
             raw = detect(text)
             return LANG_MAP.get(raw, raw)
@@ -149,6 +391,14 @@ class LanguageDetector:
     @staticmethod
     def detect_with_confidence(text: str) -> Dict[str, Any]:
         from langdetect import detect_langs
+        script_lang = infer_lang_by_script(text)
+        if script_lang is not None:
+            return {
+                "lang": script_lang,
+                "confidence": 0.99,
+                "name": LANG_NAMES.get(script_lang, script_lang),
+                "all": [{"lang": script_lang, "prob": 0.99}],
+            }
         try:
             langs = detect_langs(text)
             best = langs[0]
@@ -214,7 +464,14 @@ class TranslationEngine:
         self._device = "cpu"
         self._quantization = "none"
         self._cache: OrderedDict[tuple[str, str, str, str], str] = OrderedDict()
-        self._load_local()
+        if LAZY_LOAD_MODEL:
+            logger.info("⏭️ Lazy model loading enabled; model will load on first translation request")
+        else:
+            self._load_local()
+
+    def ensure_model_loaded(self):
+        if self._model is None or self._tokenizer is None:
+            self._load_local()
 
     def _load_local(self):
         """Load Sailor2 model locally."""
@@ -298,7 +555,11 @@ class TranslationEngine:
             logger.error(f"Local model load failed: {e}")
 
     def _estimate_max_new_tokens(self, text: str) -> int:
-        estimated = max(32, min(MAX_TRANSLATION_TOKENS, len(text) * 2))
+        estimated = max(32, len(text) * 2)
+        if MAX_TRANSLATION_TOKENS > 0:
+            estimated = min(MAX_TRANSLATION_TOKENS, estimated)
+        elif SOFT_MAX_TRANSLATION_TOKENS > 0:
+            estimated = min(SOFT_MAX_TRANSLATION_TOKENS, estimated)
         return estimated
 
     def _build_generation_kwargs(self, max_new_tokens: int, streamer: Any = None) -> Dict[str, Any]:
@@ -372,9 +633,70 @@ class TranslationEngine:
             src_name=src_name, tgt_name=tgt_name, text=full_text
         )
 
+    def _build_assistant_prompt(self, message: str, target_lang: str, context: str = "") -> str:
+        tgt_name = LANG_NAMES.get(target_lang, target_lang)
+        context_block = ""
+        if context:
+            context_block = f"<official_context>\n{context}\n</official_context>\n\n"
+
+        return (
+            "<|im_start|>system\n"
+            "You are CitizenAI, a warm and knowledgeable government services assistant — like a helpful friend who works in the civil service. "
+            f"Always respond in {tgt_name}, matching the user's register (formal if they are formal, casual if they are casual).\n\n"
+
+            "## Conversation Style\n"
+            "- Speak directly to the user in a natural, human tone — not like a FAQ page or official document.\n"
+            "- For greetings, small talk, or emotional messages: respond conversationally, warmly, and briefly.\n"
+            "- Never give robotic, bullet-point-only responses unless the user explicitly asks for a list.\n"
+            "- Never analyze or paraphrase the user's message back to them.\n\n"
+            "- Do not repeat or restate the user's question before answering.\n\n"
+
+            "## When Answering Government / Service Questions\n"
+            "- Lead with the most useful, direct answer first — then add context if needed.\n"
+            "- Break complex processes into simple numbered steps when there are multiple actions required.\n"
+            "- If a relevant official link, portal, or hotline exists, include it naturally in the response "
+            "(e.g. 'You can apply directly at [MyEG portal](https://www.myeg.com.my) — it usually takes about 10 minutes.').\n"
+            "- Acknowledge if something varies by state, citizenship status, or situation, and ask a clarifying question if needed.\n"
+            "- Never hallucinate links, fees, deadlines, or policy details. If unsure, say so and point to the right authority.\n\n"
+
+            "## Proactive Guidance\n"
+            "- After answering, anticipate what the user likely needs to know next and offer it naturally "
+            "(e.g. 'While you're at it, you'll probably also need to...', or 'One thing people often miss is...').\n"
+            "- End with ONE short follow-up question or suggestion that moves the user forward "
+            "(e.g. 'Would you like to know what documents you need to bring?', or 'Are you applying as a first-time applicant?').\n"
+            "- Do not ask multiple questions at once. Pick the single most useful one.\n\n"
+
+            "## Boundaries\n"
+            "- Do not give legal advice — refer to a lawyer or legal aid if needed.\n"
+            "- Do not speculate on politically sensitive matters.\n"
+            "- If a question is completely outside government services scope, acknowledge it briefly and redirect.\n"
+            "<|im_end|>\n"
+            "<|im_start|>user\n"
+            f"{context_block}"
+            f"{message}\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+
+    def generate_assistant_reply(self, message: str, target_lang: str, context: str = "") -> str:
+        self.ensure_model_loaded()
+        prompt = self._build_assistant_prompt(message, target_lang, context)
+        max_new_tokens = max(96, len(message) * 4)
+        if ASSISTANT_MAX_NEW_TOKENS > 0:
+            max_new_tokens = min(ASSISTANT_MAX_NEW_TOKENS, max_new_tokens)
+        elif SOFT_MAX_ASSISTANT_TOKENS > 0:
+            max_new_tokens = min(SOFT_MAX_ASSISTANT_TOKENS, max_new_tokens)
+        try:
+            return self._clean_translation(self._generate_text(prompt, max_new_tokens))
+        except Exception as e:
+            logger.error(f"Assistant generation error: {e}")
+            return "I can help, but I hit an internal generation error. Please try again."
+
     def translate(self, text: str, src_lang: str, tgt_lang: str,
                   context: str = "") -> str:
         """Blocking translation using local Sailor2 model."""
+        self.ensure_model_loaded()
+
         cached = self._get_cached_translation(text, src_lang, tgt_lang, context)
         if cached is not None:
             return cached
@@ -399,6 +721,8 @@ class TranslationEngine:
         self, text: str, src_lang: str, tgt_lang: str, context: str = ""
     ) -> AsyncGenerator[str, None]:
         """True streaming translation using TextIteratorStreamer."""
+        self.ensure_model_loaded()
+
         cached = self._get_cached_translation(text, src_lang, tgt_lang, context)
         if cached is not None:
             for chunk in cached.split(" "):
@@ -678,6 +1002,7 @@ class ChatRequest(BaseModel):
     session_id: str = "default"
     message: str
     target_lang: str = "en"
+    assistant_mode: bool = True
 
 class DetectRequest(BaseModel):
     text: str
@@ -695,7 +1020,7 @@ def root():
     return {
         "service": "SEA Translation Chatbot",
         "version": "1.0.0",
-        "endpoints": ["/chat", "/chat/stream", "/detect", "/history",
+        "endpoints": ["/chat/stream", "/detect", "/history",
                       "/kb/add", "/health"],
     }
 
@@ -708,21 +1033,8 @@ def detect_language(req: DetectRequest):
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    """
-    Non-streaming translation endpoint.
-    Returns full translation with metadata.
-    """
-    if not req.message.strip():
-        raise HTTPException(400, "Message cannot be empty")
-
-    result = await chatbot.respond(
-        req.session_id, req.message, req.target_lang, stream=False
-    )
-    return {
-        **result,
-        "session_id": req.session_id,
-        "timestamp":  datetime.utcnow().isoformat(),
-    }
+    """Non-streaming endpoint is intentionally disabled; use /chat/stream."""
+    raise HTTPException(410, "Non-streaming chat is disabled. Use /chat/stream.")
 
 
 @app.post("/chat/stream")
@@ -737,6 +1049,7 @@ async def chat_stream(req: ChatRequest):
     # Detect language first (fast, non-streaming)
     detection = chatbot.detector.detect_with_confidence(req.message)
     src_lang = detection["lang"]
+    response_lang = resolve_response_lang(src_lang, req.target_lang)
 
     # Send metadata header first, then stream tokens
     async def event_generator():
@@ -746,23 +1059,76 @@ async def chat_stream(req: ChatRequest):
             "src_lang":   src_lang,
             "src_name":   detection["name"],
             "confidence": detection["confidence"],
-            "tgt_lang":   req.target_lang,
+            "tgt_lang":   response_lang,
         })
         yield f"data: {meta}\n\n"
 
-        # Stream translation tokens
-        if src_lang == req.target_lang:
-            yield f"data: {json.dumps({'type': 'token', 'text': req.message})}\n\n"
+        context = chatbot.kb.retrieve(req.message) if chatbot.kb.ready else ""
+
+        if req.assistant_mode:
+            if is_off_topic_message(req.message):
+                if response_lang == "en":
+                    final_reply = SYSTEM_SCOPE_REDIRECT_EN
+                else:
+                    final_reply = chatbot.engine.translate(
+                        SYSTEM_SCOPE_REDIRECT_EN, "en", response_lang, context
+                    )
+                final_reply = sanitize_assistant_output(final_reply)
+                for chunk in final_reply.split(" "):
+                    if chunk:
+                        yield f"data: {json.dumps({'type': 'token', 'text': chunk + ' '})}\n\n"
+                        await asyncio.sleep(STREAM_CHUNK_DELAY)
+                chatbot.memory.add(req.session_id, req.message, final_reply)
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
+            # Hybrid mode: rule-based template when matched, otherwise model-generated answer.
+            rule_reply_en = build_assistant_reply(req.message)
+            if rule_reply_en is not None:
+                if response_lang == "en":
+                    final_reply = rule_reply_en
+                else:
+                    final_reply = chatbot.engine.translate(
+                        rule_reply_en, "en", response_lang, context
+                    )
+            else:
+                final_reply = chatbot.engine.generate_assistant_reply(
+                    req.message, response_lang, context
+                )
+
+            final_reply = sanitize_assistant_output(final_reply)
+            out_lang = chatbot.detector.detect(final_reply)
+            if out_lang != response_lang and final_reply.strip():
+                final_reply = chatbot.engine.translate(
+                    final_reply, out_lang, response_lang, context
+                )
+                final_reply = sanitize_assistant_output(final_reply)
+
+            if needs_language_correction(final_reply, response_lang):
+                final_reply = chatbot.engine.translate(
+                    final_reply, chatbot.detector.detect(final_reply), response_lang, context
+                )
+                final_reply = sanitize_assistant_output(final_reply)
+
+            for chunk in final_reply.split(" "):
+                if chunk:
+                    yield f"data: {json.dumps({'type': 'token', 'text': chunk + ' '})}\n\n"
+                    await asyncio.sleep(STREAM_CHUNK_DELAY)
         else:
-            context = chatbot.kb.retrieve(req.message) if chatbot.kb.ready else ""
             async for token in chatbot.engine.translate_stream(
-                req.message, src_lang, req.target_lang, context
+                req.message,
+                src_lang,
+                req.target_lang,
+                context,
             ):
                 payload = json.dumps({"type": "token", "text": token})
                 yield f"data: {payload}\n\n"
                 await asyncio.sleep(0)
+            final_reply = chatbot.engine.translate(req.message, src_lang, req.target_lang, context)
 
         # Done event
+        chatbot.memory.add(req.session_id, req.message, final_reply)
+
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
@@ -807,6 +1173,8 @@ def health():
         "streaming":       True,
         "quantization":    chatbot.engine._quantization,
         "max_tokens":      MAX_TRANSLATION_TOKENS,
+        "soft_max_translation_tokens": SOFT_MAX_TRANSLATION_TOKENS,
+        "soft_max_assistant_tokens": SOFT_MAX_ASSISTANT_TOKENS,
     }
 
 
@@ -965,11 +1333,13 @@ async def whatsapp_webhook(request: Request, background: BackgroundTasks):
 @app.on_event("startup")
 async def on_startup():
     logger.info("🌏 SEA Translation Chatbot starting…")
-    # Check model cache status
-    log_cache_status()
+    if STARTUP_CHECK_CACHE:
+        log_cache_status()
+    else:
+        logger.info("⏩ Skipping cache status scan (set STARTUP_CHECK_CACHE=1 to enable)")
     # Start Telegram bot in background if token provided
     asyncio.create_task(setup_telegram())
 
 
 if __name__ == "__main__":
-    uvicorn.run("translation:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("translation:app", host="0.0.0.0", port=8000, reload=UVICORN_RELOAD)

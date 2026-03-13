@@ -5,7 +5,7 @@ const TRANSLATION_API_URL = process.env.TRANSLATION_API_URL || 'http://localhost
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { message, target_lang = 'en', session_id = 'default' } = body
+    const { message, target_lang = 'en', session_id = 'default', assistant_mode = true } = body
 
     if (!message?.trim()) {
       return NextResponse.json(
@@ -23,6 +23,7 @@ export async function POST(request: NextRequest) {
         session_id,
         message,
         target_lang,
+        assistant_mode,
       }),
       cache: 'no-store',
     })
