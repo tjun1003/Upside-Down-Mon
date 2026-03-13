@@ -1,310 +1,238 @@
 'use client'
+import React, { useState, useRef, useEffect } from 'react'
+import Link from 'next/link'
 
-import {
-  startTransition,
-  useRef,
-  useState,
-} from 'react'
-
-const SESSION_ID = 'user-session'
-
-// 支持的语言列表
-const LANGUAGES = [
-  { code: 'en', name: 'English' },
-  { code: 'zh', name: '中文' },
-  { code: 'ms', name: 'Bahasa Melayu' },
-  { code: 'id', name: 'Bahasa Indonesia' },
-  { code: 'th', name: 'ไทย (Thai)' },
-  { code: 'vi', name: 'Tiếng Việt' },
-  { code: 'tl', name: 'Filipino' },
-  { code: 'my', name: 'မြန်မာ (Burmese)' },
-  { code: 'ta', name: 'தமிழ் (Tamil)' },
-  { code: 'km', name: 'ភាសាខ្មែរ (Khmer)' },
-  { code: 'lo', name: 'ລາວ (Lao)' },
-  { code: 'ja', name: '日本語' },
-  { code: 'ko', name: '한국어' },
-]
-
-interface TranslationResult {
-  translation: string
-  src_lang: string
-  src_name: string
-  confidence: number
-  tgt_lang: string
-  tgt_name: string
-  session_id: string
+interface Message {
+  id: number
+  role: 'user' | 'ai'
+  text: string
   timestamp: string
 }
 
-type StreamPayload =
-  | { type: 'meta'; src_lang: string; src_name: string; confidence: number; tgt_lang: string }
-  | { type: 'token'; text: string }
-  | { type: 'done' }
+const QUICK_PROMPTS = [
+  { label: '🏥 Hospital subsidy', text: 'How do I apply for a hospital subsidy?' },
+  { label: '🎓 Scholarship info', text: 'What scholarships are available for my child?' },
+  { label: '🏠 Housing aid', text: 'How can I apply for affordable housing assistance?' },
+  { label: '⚖️ Legal rights', text: 'What are my rights as a migrant worker?' },
+]
 
-function getLanguageName(code: string) {
-  return LANGUAGES.find((language) => language.code === code)?.name || code
+const LANG_OPTIONS = [
+  { code: 'en', label: 'English' },
+  { code: 'ms', label: 'Bahasa Melayu' },
+  { code: 'th', label: 'ภาษาไทย' },
+  { code: 'tl', label: 'Tagalog' },
+  { code: 'vi', label: 'Tiếng Việt' },
+  { code: 'zh', label: '中文' },
+  { code: 'id', label: 'Bahasa Indonesia' },
+]
+
+const AI_RESPONSES: Record<string, string> = {
+  default: 'I understand your question. Based on official government documents, this service is available to all residents. You may apply online via the government portal or visit your nearest service centre. Would you like me to explain further?',
+  subsidy: 'Hospital subsidies are available under the Skim Peduli Kesihatan programme. To apply: (1) Register at MySejahtera portal, (2) Upload your IC and income documents, (3) Visit any government clinic for assessment. The process takes 5 to 7 working days.',
+  scholarship: 'Several scholarships are available: JPA Scholarship (full tuition), MARA Loans (low-interest), and State Education Bursaries. Eligibility depends on household income and academic results. Which education level is your child in?',
+  housing: 'Affordable housing programmes include PR1MA for middle income, PPR Rental for low income, and MyDeposit for first-home buyers. Apply online at ehome.kpkt.gov.my. What is your household income range?',
+  legal: 'As a migrant worker you have the right to fair wages, safe working conditions, healthcare access, and the right to file complaints with JTKSM. Call the Labour Hotline: 1800-88-8088 (free). Would you like this in another language?',
 }
 
-function createPendingResult(targetLang: string): TranslationResult {
-  return {
-    translation: '',
-    src_lang: '',
-    src_name: '',
-    confidence: 0,
-    tgt_lang: targetLang,
-    tgt_name: getLanguageName(targetLang),
-    session_id: SESSION_ID,
-    timestamp: new Date().toISOString(),
-  }
+function getAIResponse(text: string): string {
+  const lower = text.toLowerCase()
+  if (lower.includes('subsidi') || lower.includes('hospital') || lower.includes('health')) return AI_RESPONSES.subsidy
+  if (lower.includes('scholarship') || lower.includes('education') || lower.includes('school')) return AI_RESPONSES.scholarship
+  if (lower.includes('hous') || lower.includes('rumah')) return AI_RESPONSES.housing
+  if (lower.includes('legal') || lower.includes('right') || lower.includes('migrant')) return AI_RESPONSES.legal
+  return AI_RESPONSES.default
 }
 
-export default function CollectionsPage() {
-  const [inputText, setInputText] = useState('')
-  const [targetLang, setTargetLang] = useState('en')
-  const [isLoading, setIsLoading] = useState(false)
-  const [result, setResult] = useState<TranslationResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
+function getTime(): string {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
-  const activeControllerRef = useRef<AbortController | null>(null)
-  const requestIdRef = useRef(0)
+export default function ChatPage() {
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 0, role: 'ai', timestamp: getTime(),
+      text: 'Hello! I am CitizenAI, your multilingual government services assistant. Ask me anything about public health, education, housing, or legal rights in any language you are comfortable with.',
+    }
+  ])
+  const [input, setInput] = useState('')
+  const [isTyping, setIsTyping] = useState(false)
+  const [selectedLang, setSelectedLang] = useState('en')
+  const [showLangDropdown, setShowLangDropdown] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
 
-  const cancelActiveRequest = () => {
-    activeControllerRef.current?.abort()
-    activeControllerRef.current = null
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, isTyping])
+
+  const sendMessage = async (text: string) => {
+    if (!text.trim()) return
+    const userMsg: Message = { id: Date.now(), role: 'user', text: text.trim(), timestamp: getTime() }
+    setMessages(prev => [...prev, userMsg])
+    setInput('')
+    setIsTyping(true)
+    await new Promise(r => setTimeout(r, 1200 + Math.random() * 600))
+    const aiMsg: Message = { id: Date.now() + 1, role: 'ai', text: getAIResponse(text), timestamp: getTime() }
+    setIsTyping(false)
+    setMessages(prev => [...prev, aiMsg])
   }
 
-  const runTranslation = async (message: string) => {
-    const trimmedMessage = message.trim()
-
-    if (!trimmedMessage) {
-      cancelActiveRequest()
-      setIsLoading(false)
-      setResult(null)
-      setError(null)
-      return
-    }
-
-    const requestId = requestIdRef.current + 1
-    requestIdRef.current = requestId
-
-    cancelActiveRequest()
-    const controller = new AbortController()
-    activeControllerRef.current = controller
-
-    setIsLoading(true)
-    setError(null)
-
-    startTransition(() => {
-      setResult(createPendingResult(targetLang))
-    })
-
-    try {
-      const response = await fetch('/api/translate/stream', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          message: trimmedMessage,
-          target_lang: targetLang,
-          session_id: SESSION_ID,
-        }),
-        signal: controller.signal,
-      })
-
-      if (!response.ok) {
-        const data = await response.json()
-        throw new Error(data.error || '翻译失败')
-      }
-
-      if (!response.body) {
-        throw new Error('翻译服务没有返回流式内容')
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done || requestId !== requestIdRef.current) {
-          break
-        }
-
-        buffer += decoder.decode(value, { stream: true })
-        const events = buffer.split('\n\n')
-        buffer = events.pop() || ''
-
-        for (const event of events) {
-          const dataLine = event
-            .split('\n')
-            .find((line) => line.startsWith('data: '))
-
-          if (!dataLine || requestId !== requestIdRef.current) {
-            continue
-          }
-
-          const payload = JSON.parse(dataLine.slice(6)) as StreamPayload
-
-          if (payload.type === 'meta') {
-            startTransition(() => {
-              setResult((previous) => ({
-                translation: previous?.translation || '',
-                src_lang: payload.src_lang,
-                src_name: payload.src_name,
-                confidence: payload.confidence,
-                tgt_lang: payload.tgt_lang,
-                tgt_name: getLanguageName(payload.tgt_lang),
-                session_id: SESSION_ID,
-                timestamp: previous?.timestamp || new Date().toISOString(),
-              }))
-            })
-          }
-
-          if (payload.type === 'token') {
-            startTransition(() => {
-              setResult((previous) => ({
-                translation: `${previous?.translation || ''}${payload.text}`,
-                src_lang: previous?.src_lang || '',
-                src_name: previous?.src_name || '',
-                confidence: previous?.confidence || 0,
-                tgt_lang: previous?.tgt_lang || targetLang,
-                tgt_name: previous?.tgt_name || getLanguageName(targetLang),
-                session_id: SESSION_ID,
-                timestamp: previous?.timestamp || new Date().toISOString(),
-              }))
-            })
-          }
-        }
-      }
-
-    } catch (err) {
-      if (controller.signal.aborted || requestId !== requestIdRef.current) {
-        return
-      }
-
-      setResult(null)
-      setError(err instanceof Error ? err.message : '翻译服务出错，请稍后重试')
-    } finally {
-      if (requestId === requestIdRef.current) {
-        activeControllerRef.current = null
-        setIsLoading(false)
-      }
-    }
+  const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) }
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-gray-900 p-8">
-      <div className="max-w-4xl mx-auto">
-        {/* 页面标题 */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-            🌏 东南亚语言翻译
-          </h1>
-          <p className="text-gray-600 dark:text-gray-400">
-            自动检测语言并翻译到目标语言
-          </p>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--paper)' }}>
+
+      <header style={{
+        background: '#ffffff', borderBottom: '1px solid var(--border)',
+        padding: '0 1.5rem', height: '64px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <Link href="/" style={{ color: 'var(--muted)', textDecoration: 'none', fontSize: '0.85rem' }}>
+            ← Back to Dashboard
+          </Link>
+          <span style={{ color: 'var(--border)' }}>|</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--teal)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>🤖</div>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--ink)' }}>CitizenAI Assistant</div>
+              <div style={{ fontSize: '0.7rem', color: 'var(--teal)' }}>Online · RAG-powered</div>
+            </div>
+          </div>
         </div>
 
-        {/* 翻译界面 */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-sm border border-gray-200 dark:border-gray-700">
-          {/* 输入区域 */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              输入文本（自动检测语言）
-            </label>
-            <textarea
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="在这里输入要翻译的文本..."
-              rows={4}
-              className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg 
-                       bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                       focus:ring-2 focus:ring-blue-500 focus:border-transparent
-                       placeholder-gray-400 dark:placeholder-gray-500"
-            />
-          </div>
-
-          {/* 目标语言选择 */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              翻译到
-            </label>
-            <select
-              value={targetLang}
-              onChange={(e) => setTargetLang(e.target.value)}
-              className="w-full sm:w-auto px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg
-                       bg-white dark:bg-gray-700 text-gray-900 dark:text-white
-                       focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            >
-              {LANGUAGES.map((lang) => (
-                <option key={lang.code} value={lang.code}>
-                  {lang.name}
-                </option>
+        <div style={{ position: 'relative' }}>
+          <button onClick={() => setShowLangDropdown(v => !v)} style={{
+            background: 'var(--teal-light)', border: '1px solid var(--teal)',
+            borderRadius: '9999px', padding: '6px 14px',
+            fontSize: '0.8rem', color: 'var(--teal)', fontWeight: 500, cursor: 'pointer',
+          }}>
+            {LANG_OPTIONS.find(l => l.code === selectedLang)?.label} ▾
+          </button>
+          {showLangDropdown && (
+            <div style={{
+              position: 'absolute', top: '110%', right: 0,
+              background: '#ffffff', border: '1px solid var(--border)',
+              borderRadius: '10px', boxShadow: '0 4px 20px rgba(15,25,35,0.12)',
+              zIndex: 200, minWidth: '160px', overflow: 'hidden',
+            }}>
+              {LANG_OPTIONS.map(l => (
+                <button key={l.code} onClick={() => { setSelectedLang(l.code); setShowLangDropdown(false) }} style={{
+                  width: '100%', padding: '10px 14px', textAlign: 'left',
+                  background: selectedLang === l.code ? 'var(--teal-light)' : 'transparent',
+                  color: selectedLang === l.code ? 'var(--teal)' : 'var(--ink)',
+                  border: 'none', cursor: 'pointer', fontSize: '0.85rem',
+                  fontWeight: selectedLang === l.code ? 600 : 400,
+                }}>
+                  {l.label}
+                </button>
               ))}
-            </select>
-          </div>
-
-          {/* 操作按钮 */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <button
-              onClick={() => void runTranslation(inputText)}
-              disabled={isLoading || !inputText.trim()}
-              className="w-full sm:w-auto px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400
-                     text-white font-medium rounded-lg transition-colors
-                     flex items-center justify-center gap-2"
-            >
-              {isLoading ? (
-                <>
-                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                  </svg>
-                  翻译中...
-                </>
-              ) : (
-                '翻译'
-              )}
-            </button>
-          </div>
+            </div>
+          )}
         </div>
+      </header>
 
-        {/* 错误提示 */}
-        {error && (
-          <div className="mt-4 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
-            <p className="text-red-700 dark:text-red-400">{error}</p>
-          </div>
-        )}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 0' }}>
+        <div style={{ maxWidth: '760px', margin: '0 auto', padding: '0 1.5rem' }}>
 
-        {/* 翻译结果 */}
-        {result && (
-          <div className="mt-6 bg-white dark:bg-gray-800 rounded-xl p-6 shadow-sm border border-gray-200 dark:border-gray-700">
-            <div className="flex items-center gap-2 mb-4">
-              <span className="px-3 py-1 text-sm bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-full">
-                {(result.src_name || '检测中')} → {result.tgt_name}
-              </span>
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                置信度: {(result.confidence * 100).toFixed(1)}%
-              </span>
+          {messages.length === 1 && (
+            <div style={{ marginBottom: '28px' }}>
+              <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: '10px', fontWeight: 500 }}>QUICK QUESTIONS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {QUICK_PROMPTS.map(q => (
+                  <button key={q.label} onClick={() => sendMessage(q.text)} style={{
+                    background: '#ffffff', border: '1px solid var(--border)',
+                    borderRadius: '9999px', padding: '8px 16px',
+                    fontSize: '0.82rem', cursor: 'pointer', color: 'var(--ink)',
+                  }}>
+                    {q.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-              <p className="text-lg text-gray-900 dark:text-white whitespace-pre-wrap">
-                {result.translation || '正在生成翻译...'}
-              </p>
-            </div>
-          </div>
-        )}
+          )}
 
-        {/* 返回首页 */}
-        <div className="mt-8 text-center">
-          <a
-            href="/"
-            className="text-blue-600 dark:text-blue-400 hover:underline"
-          >
-            ← 返回首页
-          </a>
+          {messages.map(msg => (
+            <div key={msg.id} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: '20px' }}>
+              {msg.role === 'ai' && (
+                <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--teal)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, marginRight: '10px', flexShrink: 0, alignSelf: 'flex-end' }}>🤖</div>
+              )}
+              <div style={{ maxWidth: '72%' }}>
+                <div style={{
+                  padding: '12px 16px',
+                  borderRadius: msg.role === 'user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                  background: msg.role === 'user' ? 'var(--teal)' : '#ffffff',
+                  color: msg.role === 'user' ? '#ffffff' : 'var(--ink)',
+                  border: msg.role === 'ai' ? '1px solid var(--border)' : 'none',
+                  fontSize: '0.9rem', lineHeight: 1.65,
+                }}>
+                  {msg.text}
+                </div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '4px', textAlign: msg.role === 'user' ? 'right' : 'left' }}>
+                  {msg.timestamp}
+                </div>
+              </div>
+              {msg.role === 'user' && (
+                <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--gold)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, marginLeft: '10px', flexShrink: 0, alignSelf: 'flex-end' }}>👤</div>
+              )}
+            </div>
+          ))}
+
+          {isTyping && (
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: '10px', marginBottom: '20px' }}>
+              <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--teal)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>🤖</div>
+              <div style={{ background: '#ffffff', border: '1px solid var(--border)', borderRadius: '18px 18px 18px 4px', padding: '14px 18px', display: 'flex', gap: '5px', alignItems: 'center' }}>
+                {[0, 1, 2].map(i => (
+                  <div key={i} style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--teal)', animation: 'bounce 1.1s ease infinite', animationDelay: `${i * 0.18}s` }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div ref={bottomRef} />
         </div>
       </div>
-    </main>
+
+      <div style={{ background: 'var(--teal-light)', borderTop: '1px solid var(--border)', padding: '8px 1.5rem', fontSize: '0.75rem', color: 'var(--teal)', display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+        <span>📄</span>
+        <span>Responses grounded in official government documents via RAG</span>
+      </div>
+
+      <div style={{ background: '#ffffff', borderTop: '1px solid var(--border)', padding: '16px 1.5rem', flexShrink: 0 }}>
+        <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', background: 'var(--cream)', borderRadius: '20px', padding: '10px 14px', border: '1.5px solid var(--border)' }}>
+            <button style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.2rem', padding: '4px', color: 'var(--muted)', flexShrink: 0 }}>🎤</button>
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder={`Type in any language (${LANG_OPTIONS.find(l => l.code === selectedLang)?.label})`}
+              rows={1}
+              style={{ flex: 1, background: 'none', border: 'none', outline: 'none', fontFamily: 'var(--font-body)', fontSize: '0.9rem', color: 'var(--ink)', resize: 'none', lineHeight: 1.5, maxHeight: '120px' }}
+            />
+            <button
+              onClick={() => sendMessage(input)}
+              disabled={!input.trim() || isTyping}
+              style={{
+                background: input.trim() && !isTyping ? 'var(--teal)' : 'var(--border)',
+                color: input.trim() && !isTyping ? '#ffffff' : 'var(--muted)',
+                border: 'none', borderRadius: '9999px', width: 36, height: 36,
+                cursor: input.trim() && !isTyping ? 'pointer' : 'default',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '1rem', flexShrink: 0,
+              }}
+            >↑</button>
+          </div>
+          <div style={{ textAlign: 'center', fontSize: '0.7rem', color: 'var(--muted)', marginTop: '8px' }}>
+            Press Enter to send · Shift+Enter for new line · Powered by RAG + SEA-LION
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes bounce { 0%,80%,100%{transform:translateY(0)} 40%{transform:translateY(-6px)} }
+      `}</style>
+    </div>
   )
 }
