@@ -1,29 +1,32 @@
 @echo off
-REM ═══════════════════════════════════════════════════════════════════
-REM 🚀 启动脚本 - 双击即可运行
-REM ═══════════════════════════════════════════════════════════════════
+echo.
+echo Starting Hackathon project...
+echo.
 
-echo.
-echo 🚀 启动 Hackathon 项目...
-echo.
+echo Cleaning old listeners on ports 8000 and 3000...
+for %%P in (8000 3000) do (
+	for /f "tokens=5" %%I in ('netstat -aon ^| findstr /r /c:":%%P .*LISTENING"') do (
+		taskkill /PID %%I /F >nul 2>&1
+	)
+)
 
 REM 启动 Python 后端
-echo 📦 启动 Python 翻译后端 (端口 8000)...
+echo Starting Python backend on port 8000...
 start "Python Backend" cmd /k "cd /d %~dp0src\app\api\translate && conda run -n Hackathon --no-capture-output python translation.py"
 
 REM 等待 2 秒让后端先启动
 timeout /t 2 /nobreak > nul
 
 REM 启动 Next.js 前端
-echo ⚛️  启动 Next.js 前端 (端口 3000)...
+echo Starting Next.js frontend on port 3000...
 start "Next.js Frontend" cmd /k "cd /d %~dp0 && npm run dev"
 
 echo.
-echo ✅ 所有服务已启动!
+echo Services started.
 echo.
-echo 📍 前端地址: http://localhost:3000
-echo 📍 后端地址: http://localhost:8000
+echo Frontend: http://localhost:3000
+echo Backend:  http://localhost:8000
 echo.
-echo 💡 提示: 关闭打开的命令行窗口即可停止服务
+echo Tip: run npm run stop:all to stop both ports quickly.
 echo.
 pause

@@ -1,0 +1,21 @@
+from typing import Any, Dict, List
+
+from pydantic import BaseModel
+
+class ChatRequest(BaseModel):
+    session_id: str = "default"
+    message: str
+    target_lang: str = "auto"
+    assistant_mode: bool = True
+
+
+class DetectRequest(BaseModel):
+    text: str
+
+
+class KBAddRequest(BaseModel):
+    documents: List[Dict[str, Any]]
+
+
+class ClearRequest(BaseModel):
+    session_id: str = "default"

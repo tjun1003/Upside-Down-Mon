@@ -35,6 +35,25 @@ async function streamAIResponse(
 	sessionId: string,
 	onToken: (token: string) => void,
 ): Promise<void> {
+	const processEventChunk = (eventChunk: string) => {
+		const lines = eventChunk.split(/\r?\n/)
+		for (const line of lines) {
+			const match = line.match(/^data:\s?(.*)$/)
+			if (!match) continue
+			const payload = match[1]
+			if (!payload) continue
+
+			try {
+				const event = JSON.parse(payload)
+				if (event?.type === 'token' && typeof event.text === 'string') {
+					onToken(event.text)
+				}
+			} catch {
+				// Ignore malformed SSE chunks and keep streaming.
+			}
+		}
+	}
+
 	const response = await fetch('/api/translate/stream', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -62,28 +81,19 @@ async function streamAIResponse(
 
 	while (true) {
 		const { done, value } = await reader.read()
-		if (done) break
+		if (done) {
+			if (buffer.trim()) {
+				processEventChunk(buffer)
+			}
+			break
+		}
 
 		buffer += decoder.decode(value, { stream: true })
-		const events = buffer.split('\n\n')
+		const events = buffer.split(/\r?\n\r?\n/)
 		buffer = events.pop() || ''
 
 		for (const eventChunk of events) {
-			const lines = eventChunk.split('\n')
-			for (const line of lines) {
-				if (!line.startsWith('data: ')) continue
-				const payload = line.slice(6)
-				if (!payload) continue
-
-				try {
-					const event = JSON.parse(payload)
-					if (event?.type === 'token' && typeof event.text === 'string') {
-						onToken(event.text)
-					}
-				} catch {
-					// Ignore malformed SSE chunks and keep streaming.
-				}
-			}
+			processEventChunk(eventChunk)
 		}
 	}
 }
@@ -112,7 +122,7 @@ export default function ChatPage() {
 
 	const sendMessage = async (text: string) => {
 		if (!text.trim()) return
-		const targetLang = selectedLang === 'auto' ? 'en' : selectedLang
+		const targetLang = selectedLang === 'auto' ? 'auto' : selectedLang
 		const userMsg: Message = { id: Date.now(), role: 'user', text: text.trim(), timestamp: getTime() }
 		const aiMessageId = Date.now() + 1
 		setMessages(prev => [...prev, userMsg])

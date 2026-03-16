@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "start:all": "powershell -ExecutionPolicy Bypass -File ./start.ps1"
+    "start:all": "powershell -ExecutionPolicy Bypass -File ./start.ps1",
+    "stop:all": "powershell -ExecutionPolicy Bypass -File ./stop.ps1"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +29,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.2.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "undici": "^7.24.2"
   }
 }

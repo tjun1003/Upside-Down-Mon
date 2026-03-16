@@ -58,3 +58,48 @@ npm run lint
 - [Next.js 文档](https://nextjs.org/docs)
 - [React 文档](https://react.dev)
 - [Tailwind CSS 文档](https://tailwindcss.com/docs)
+
+## MongoDB Atlas RAG 配置
+
+后端位于 `src/app/api/translate/translation.py`，已支持 MongoDB Atlas 作为知识库检索源（Atlas 优先，本地索引兜底）。
+
+1. 编辑 `src/app/api/translate/.env`（可参考 `.env.example`）并设置：
+
+```env
+USE_ATLAS_KB=1
+MONGODB_ATLAS_URI=mongodb+srv://<user>:<password>@<cluster>/?retryWrites=true&w=majority
+MONGODB_ATLAS_DB=<你的数据库名>
+MONGODB_ATLAS_COLLECTION=<你的集合名>
+
+# 字段映射（按你的文档结构调整）
+MONGODB_TEXT_FIELD=text
+MONGODB_SOURCE_FIELD=source
+MONGODB_METADATA_FIELD=metadata
+
+# 如已配置 Atlas Vector Search（推荐）
+MONGODB_USE_VECTOR_SEARCH=1
+MONGODB_EMBEDDING_FIELD=embedding
+MONGODB_ATLAS_VECTOR_INDEX=default
+MONGODB_RAG_TOP_K=3
+MONGODB_RAG_NUM_CANDIDATES=60
+```
+
+2. 安装后端依赖（至少包含 `pymongo`）。
+3. 启动项目后访问后端健康检查：`http://localhost:8000/health`。
+4. 确认返回中 `atlas_kb_enabled=true` 且 `atlas_kb_ready=true`。
+
+如果你还没在 Atlas 建立向量索引，可先把 `MONGODB_USE_VECTOR_SEARCH=0`，系统会自动回退为关键词检索。
+
+如果你的集合还没有 embedding 字段，可以运行：
+
+```bash
+conda run -n Hackathon python src/app/api/translate/atlas_vector_backfill.py --batch-size 16
+```
+
+当前这个项目接入的 Atlas 集合实际字段示例是：
+
+```env
+MONGODB_TEXT_FIELD=Detailed Context
+MONGODB_SOURCE_FIELD=Title
+MONGODB_USE_VECTOR_SEARCH=1
+```
