@@ -82,9 +82,10 @@ class MongoConversationStore:
 
 
 class MongoKnowledgeBase:
-    """Simple persistence layer for KB documents.
+    """Mongo-backed KB data access.
 
-    docs: { text, metadata }
+    This class intentionally exposes low-level CRUD-ish operations only.
+    RAG orchestration (query strategy and context formatting) should live in rag_service.py.
     """
 
     def __init__(self, db: Any):
@@ -96,8 +97,14 @@ class MongoKnowledgeBase:
         res = await self.db.kb_docs.insert_many(docs)
         return len(res.inserted_ids)
 
-    async def retrieve(self, query: str, top_k: int = 3) -> str:
-        # Minimal retrieval: return top_k documents' text. Replace with LlamaIndex as needed.
-        cursor = self.db.kb_docs.find({}, {"text": 1}).limit(top_k)
-        docs = await cursor.to_list(length=top_k)
-        return "\n---\n".join(d.get("text", "") for d in docs)
+    async def find_documents(
+        self,
+        query_filter: Optional[Dict[str, Any]] = None,
+        projection: Optional[Dict[str, Any]] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        query_filter = query_filter or {}
+        projection = projection or {"_id": 0}
+        safe_limit = max(1, int(limit))
+        cursor = self.db.kb_docs.find(query_filter, projection).limit(safe_limit)
+        return await cursor.to_list(length=safe_limit)

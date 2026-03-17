@@ -28,9 +28,12 @@ from language_tools import (
     resolve_response_lang,
     sanitize_assistant_output,
 )
+from rag_service import RAGService
 from translation_config import (
     ATLAS_COLLECTION_NAME,
     ATLAS_DB_NAME,
+    ATLAS_RAG_TOP_K,
+    ATLAS_TEXT_FIELD,
     LANG_NAMES,
     STARTUP_CHECK_CACHE,
     STREAM_CHUNK_DELAY,
@@ -39,6 +42,23 @@ from translation_config import (
     UVICORN_RELOAD,
     logger,
 )
+
+try:
+    from db import (
+        MongoConversationStore,
+        MongoKnowledgeBase,
+        close_mongo,
+        init_mongo,
+    )
+
+    DB_INTEGRATION_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - optional dependency at runtime
+    MongoConversationStore = None  # type: ignore[assignment]
+    MongoKnowledgeBase = None  # type: ignore[assignment]
+    close_mongo = None  # type: ignore[assignment]
+    init_mongo = None  # type: ignore[assignment]
+    DB_INTEGRATION_AVAILABLE = False
+    logger.warning(f"Mongo integration disabled: {exc}")
 
 
 EMPTY_ASSISTANT_FALLBACK_EN = (
@@ -61,6 +81,28 @@ app.add_middleware(
 )
 
 chatbot = SEAChatbot()
+mongo_conversation_store = None
+mongo_kb_store = None
+rag_service = RAGService(
+    default_kb=chatbot.kb,
+    logger=logger,
+    top_k=ATLAS_RAG_TOP_K,
+    text_field=ATLAS_TEXT_FIELD,
+)
+
+
+async def persist_conversation(session_id: str, message: str, reply: str) -> None:
+    """Persist chat messages to Mongo when available; fallback to in-memory store."""
+    global mongo_conversation_store
+
+    if mongo_conversation_store is not None:
+        try:
+            await mongo_conversation_store.add(session_id, message, reply)
+            return
+        except Exception as exc:
+            logger.warning(f"Mongo conversation write failed, using memory fallback: {exc}")
+
+    chatbot.memory.add(session_id, message, reply)
 
 
 @app.get("/")
@@ -127,7 +169,7 @@ async def chat_stream(req: ChatRequest):
         )
         yield f"data: {meta}\n\n"
 
-        context = chatbot.kb.retrieve(req.message) if chatbot.kb.ready else ""
+        context = await rag_service.retrieve_context(req.message)
 
         if req.assistant_mode:
             if is_off_topic_message(req.message):
@@ -160,7 +202,7 @@ async def chat_stream(req: ChatRequest):
 
                 async for event in emit_text_as_tokens(final_reply):
                     yield event
-                chatbot.memory.add(req.session_id, req.message, final_reply)
+                await persist_conversation(req.session_id, req.message, final_reply)
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
 
@@ -232,7 +274,7 @@ async def chat_stream(req: ChatRequest):
                 await asyncio.sleep(0)
             final_reply = chatbot.engine.translate(req.message, src_lang, req.target_lang, context)
 
-        chatbot.memory.add(req.session_id, req.message, final_reply)
+        await persist_conversation(req.session_id, req.message, final_reply)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
@@ -243,27 +285,54 @@ async def chat_stream(req: ChatRequest):
 
 
 @app.get("/history/{session_id}")
-def get_history(session_id: str):
+async def get_history(session_id: str):
+    if mongo_conversation_store is not None:
+        try:
+            docs = await mongo_conversation_store.history(session_id)
+            history = [
+                {
+                    "role": "assistant" if d.get("role") == "ai" else d.get("role", "assistant"),
+                    "content": d.get("text", ""),
+                }
+                for d in docs
+            ]
+            return {"session_id": session_id, "history": history}
+        except Exception as exc:
+            logger.warning(f"Mongo history read failed, using memory fallback: {exc}")
+
     return {"session_id": session_id, "history": chatbot.memory.history(session_id)}
 
 
 @app.post("/history/clear")
-def clear_history(req: ClearRequest):
+async def clear_history(req: ClearRequest):
+    if mongo_conversation_store is not None:
+        try:
+            await mongo_conversation_store.clear(req.session_id)
+        except Exception as exc:
+            logger.warning(f"Mongo history clear failed: {exc}")
+
     chatbot.memory.clear(req.session_id)
     return {"cleared": True, "session_id": req.session_id}
 
 
 @app.post("/kb/add")
-def add_to_kb(req: KBAddRequest):
-    chatbot.kb.add_documents(req.documents)
+async def add_to_kb(req: KBAddRequest):
+    await rag_service.add_documents(req.documents)
     return {"added": len(req.documents), "kb_ready": chatbot.kb.ready}
 
 
 @app.get("/health")
-def health():
+async def health():
+    active_sessions = chatbot.memory.active_sessions()
+    if mongo_conversation_store is not None:
+        try:
+            active_sessions = await mongo_conversation_store.active_sessions()
+        except Exception as exc:
+            logger.warning(f"Mongo active session count failed, using memory fallback: {exc}")
+
     return {
         "status": "ok",
-        "active_sessions": chatbot.memory.active_sessions(),
+        "active_sessions": active_sessions,
         "kb_enabled": chatbot.kb.enabled,
         "kb_ready": chatbot.kb.ready,
         "atlas_kb_enabled": USE_ATLAS_KB,
@@ -275,6 +344,8 @@ def health():
         "model_loaded": chatbot.engine._model is not None,
         "streaming": True,
         "quantization": chatbot.engine._quantization,
+        "mongo_integration_available": DB_INTEGRATION_AVAILABLE,
+        "mongo_connected": mongo_conversation_store is not None,
     }
 
 
@@ -338,12 +409,47 @@ async def whatsapp_webhook(request: Request, background: BackgroundTasks):
 
 @app.on_event("startup")
 async def on_startup():
+    global mongo_conversation_store, mongo_kb_store
+
     logger.info("SEA Translation Chatbot starting...")
     if STARTUP_CHECK_CACHE:
         log_cache_status()
     else:
         logger.info("Skipping cache status scan (set STARTUP_CHECK_CACHE=1 to enable)")
+
+    if DB_INTEGRATION_AVAILABLE and init_mongo is not None:
+        try:
+            await init_mongo(app)
+            db = getattr(app.state, "mongodb", None)
+            if db is not None and MongoConversationStore is not None and MongoKnowledgeBase is not None:
+                mongo_conversation_store = MongoConversationStore(db)
+                mongo_kb_store = MongoKnowledgeBase(db)
+                rag_service.set_mongo_store(mongo_kb_store)
+                logger.info("Mongo stores initialized (conversation + KB)")
+            else:
+                logger.info("Mongo URI not configured; using in-memory stores")
+        except Exception as exc:
+            mongo_conversation_store = None
+            mongo_kb_store = None
+            logger.warning(f"Mongo startup init failed, using in-memory stores: {exc}")
+
     asyncio.create_task(setup_telegram(chatbot))
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    global mongo_conversation_store, mongo_kb_store
+
+    mongo_conversation_store = None
+    mongo_kb_store = None
+    rag_service.set_mongo_store(None)
+
+    if DB_INTEGRATION_AVAILABLE and close_mongo is not None:
+        try:
+            close_mongo(app)
+            logger.info("Mongo connection closed")
+        except Exception as exc:
+            logger.warning(f"Mongo shutdown failed: {exc}")
 
 
 if __name__ == "__main__":

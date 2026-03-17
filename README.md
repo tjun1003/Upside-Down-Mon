@@ -84,7 +84,13 @@ MONGODB_RAG_TOP_K=3
 MONGODB_RAG_NUM_CANDIDATES=60
 ```
 
-2. 安装后端依赖（至少包含 `pymongo`）。
+2. 安装后端依赖（至少包含 `pymongo` 与 `motor`）：
+
+```bash
+conda run -n Hackathon pip install pymongo motor
+```
+
+	如果 `motor` 在 conda 默认源找不到，请优先使用上面的 `pip install` 方式。
 3. 启动项目后访问后端健康检查：`http://localhost:8000/health`。
 4. 确认返回中 `atlas_kb_enabled=true` 且 `atlas_kb_ready=true`。
 
