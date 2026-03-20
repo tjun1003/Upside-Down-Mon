@@ -197,7 +197,6 @@ async def chat_stream(req: ChatRequest):
     if auto_mode and script_lang is not None:
         response_lang = script_lang
     elif auto_mode and src_lang == "en" and float(detection.get("confidence", 0.0)) < 0.2:
-        # If detection is very uncertain and input contains non-ASCII chars, prefer Chinese for UX.
         has_non_ascii = any(ord(ch) > 127 for ch in message)
         response_lang = "zh" if has_non_ascii else "en"
     else:
@@ -228,8 +227,6 @@ async def chat_stream(req: ChatRequest):
             if rule_reply_en is not None:
                 english_reply = rule_reply_en
             else:
-                # Pipeline:
-                # user(any lang) -> EN normalize -> EN summary -> internal RAG -> external web fallback -> EN generation
                 pivot_en = message
                 if src_lang != "en":
                     logger.info(f"Assistant pipeline: translating source {src_lang} -> en")
@@ -251,7 +248,6 @@ async def chat_stream(req: ChatRequest):
                         if translated_context.strip() and not translated_context.startswith("["):
                             context_en = translated_context
 
-                # Keep generation in English and markdown-friendly.
                 generation_prompt_en = (
                     f"User request (English normalized):\n{pivot_en}\n\n"
                     f"Retrieval summary for search:\n{rag_query_en}\n\n"
@@ -276,7 +272,6 @@ async def chat_stream(req: ChatRequest):
             translations_event = json.dumps({"type": "translations", "data": translations})
             yield f"data: {translations_event}\n\n"
 
-            # Final output should follow the user's input language.
             final_output_lang = src_lang if src_lang in LANG_NAMES else response_lang
             if final_output_lang == "en":
                 final_reply = english_reply

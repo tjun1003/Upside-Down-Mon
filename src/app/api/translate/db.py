@@ -23,13 +23,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
 
-# MongoDB configuration
 MONGODB_URI = os.getenv("MONGODB_URI", "")
 MONGODB_DB = os.getenv("MONGODB_DB", "sea_translate")
 MONGODB_POOL_SIZE = int(os.getenv("MONGODB_POOL_SIZE", "10"))
 MONGODB_MAX_IDLE = int(os.getenv("MONGODB_MAX_IDLE", "45"))
 
-# Collection names
 MESSAGES_COLLECTION = "messages"
 KB_DOCS_COLLECTION = "kb_docs"
 
@@ -64,7 +62,6 @@ async def init_mongo(app: FastAPI) -> None:
         
         logger.info(f"MongoDB connected: {MONGODB_DB} (pool_size={MONGODB_POOL_SIZE})")
 
-        # Create indexes asynchronously (non-blocking)
         try:
             await _create_indexes(app.state.mongodb)
             logger.info("MongoDB indexes created/verified")
@@ -79,18 +76,15 @@ async def init_mongo(app: FastAPI) -> None:
 
 async def _create_indexes(db: Any) -> None:
     """Create essential indexes for optimal query performance."""
-    # Messages collection: frequent queries by (session_id, ts)
     await db[MESSAGES_COLLECTION].create_index(
         [("session_id", 1), ("ts", 1)],
         background=True
     )
-    # KB docs: language-based filtering
     await db[KB_DOCS_COLLECTION].create_index(
         [("metadata.lang", 1)],
         sparse=True,
         background=True
     )
-    # KB docs: entity-based search (from external RAG)
     await db[KB_DOCS_COLLECTION].create_index(
         [("metadata.entity", 1)],
         sparse=True,
@@ -157,7 +151,6 @@ class MongoConversationStore:
             ts = time.time()
 
         try:
-            # Batch insert: both messages in one operation
             messages = [
                 {
                     "session_id": session_id,
@@ -204,10 +197,9 @@ class MongoConversationStore:
         if limit < 1:
             limit = 100
         if limit > 1000:
-            limit = 1000  # Safety cap
+            limit = 1000
 
         try:
-            # Efficient query with explicit projection (excludes _id)
             cursor = (
                 self.db[MESSAGES_COLLECTION]
                 .find(
@@ -314,7 +306,6 @@ class MongoKnowledgeBase:
             )
 
         try:
-            # Batch insert (faster than sequential)
             result = await self.db[KB_DOCS_COLLECTION].insert_many(docs, ordered=False)
             count = len(result.inserted_ids)
             self.logger.info(f"KB: inserted {count} documents")
@@ -342,7 +333,6 @@ class MongoKnowledgeBase:
         query_filter = query_filter or {}
         projection = projection or {"_id": 0}
 
-        # Enforce safe limits
         safe_limit = max(1, min(int(limit), 100))
 
         try:
