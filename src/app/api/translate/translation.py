@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app_models import ChatRequest, ClearRequest, DetectRequest, KBAddRequest
 from chatbot_core import SEAChatbot, log_cache_status, setup_telegram
 from language_tools import (
+    LANG_NAMES,
     build_assistant_reply,
     resolve_response_lang,
 )
@@ -31,7 +32,6 @@ from translation_config import (
     ATLAS_DB_NAME,
     ATLAS_RAG_TOP_K,
     ATLAS_TEXT_FIELD,
-    LANG_NAMES,
     MULTI_OUTPUT_LANGS,
     STARTUP_CHECK_CACHE,
     STREAM_CHUNK_DELAY,

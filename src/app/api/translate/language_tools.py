@@ -5,9 +5,27 @@ from langdetect import detect, detect_langs
 
 from translation_config import (
     ASSISTANT_RESPONSES,
-    LANG_MAP,
-    LANG_NAMES,
 )
+
+LANG_MAP = {
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "zh": "zh",
+    "ms": "ms",
+    "th": "th",
+    "vi": "vi",
+    "ta": "ta",
+    "en": "en",
+}
+
+LANG_NAMES = {
+    "en": "English",
+    "ms": "Bahasa Melayu",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "zh": "Chinese",
+    "ta": "Tamil",
+}
 
 
 def build_assistant_reply(message: str) -> Optional[str]:
@@ -49,18 +67,10 @@ def resolve_response_lang(detected_lang: str, requested_lang: str) -> str:
 
 def infer_lang_by_script(text: str) -> Optional[str]:
     """Infer language from script for short messages where langdetect may be unstable."""
-    if re.search(r"[\uAC00-\uD7AF]", text):
-        return "ko"
-    if re.search(r"[\u3040-\u30FF]", text):
-        return "ja"
     if re.search(r"[\u0E00-\u0E7F]", text):
         return "th"
-    if re.search(r"[\u1000-\u109F]", text):
-        return "my"
-    if re.search(r"[\u0E80-\u0EFF]", text):
-        return "lo"
-    if re.search(r"[\u1780-\u17FF]", text):
-        return "km"
+    if re.search(r"[\u0B80-\u0BFF]", text):
+        return "ta"
     if re.search(r"[\u4E00-\u9FFF]", text):
         return "zh"
     return None

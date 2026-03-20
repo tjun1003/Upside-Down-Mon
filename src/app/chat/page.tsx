@@ -23,10 +23,9 @@ const LANG_OPTIONS = [
 	{ code: 'en', label: 'English' },
 	{ code: 'ms', label: 'Bahasa Melayu' },
 	{ code: 'th', label: 'ภาษาไทย' },
-	{ code: 'tl', label: 'Tagalog' },
 	{ code: 'vi', label: 'Tiếng Việt' },
 	{ code: 'zh', label: '中文' },
-	{ code: 'id', label: 'Bahasa Indonesia' },
+	{ code: 'ta', label: 'தமிழ்' },
 ]
 
 async function streamAIResponse(

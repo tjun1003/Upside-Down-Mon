@@ -55,7 +55,7 @@ EXTERNAL_RAG_PAGE_MAX_CHARS = int(os.getenv("EXTERNAL_RAG_PAGE_MAX_CHARS", "8000
 
 MULTI_OUTPUT_LANGS = [
     l.strip().lower()
-    for l in os.getenv("MULTI_OUTPUT_LANGS", "en,zh,ms,id").split(",")
+    for l in os.getenv("MULTI_OUTPUT_LANGS", "en,zh,ms,vi,th,ta").split(",")
     if l.strip()
 ]
 

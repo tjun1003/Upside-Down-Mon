@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import HumanMessage
 
-from language_tools import LanguageDetector
+from language_tools import LANG_NAMES, LanguageDetector
 from translation_config import (
     ASSISTANT_PROMPT_TEMPLATE,
     ASSISTANT_MAX_NEW_TOKENS,
@@ -26,7 +26,6 @@ from translation_config import (
     ATLAS_USE_VECTOR_SEARCH,
     ATLAS_VECTOR_INDEX,
     LAZY_LOAD_MODEL,
-    LANG_NAMES,
     LOCAL_MODELS,
     MAX_TRANSLATION_TOKENS,
     MODEL_QUANTIZATION,
