@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Dict, Tuple
 
 from dotenv import load_dotenv
 from langdetect import DetectorFactory
@@ -82,6 +83,90 @@ TRANSLATION_PROMPT_TEMPLATE = (
     "<|im_end|>\n"
     "<|im_start|>assistant\n"
 )
+
+TRANSLATION_PROMPT_TEMPLATES: Dict[Tuple[str, str], str] = {
+    ("zh", "en"): (
+        "<|im_start|>system\n"
+        "You are a professional Chinese-to-English translator. "
+        "Translate naturally into fluent English while preserving meaning, legal/policy nuance, and tone. "
+        "Keep official names (programmes, ministries, forms) accurate and consistent. "
+        "Output ONLY the English translation.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("ms", "en"): (
+        "<|im_start|>system\n"
+        "You are a professional Bahasa Melayu-to-English translator. "
+        "Preserve policy terms and government programme names faithfully. "
+        "Keep sentence intent and level of formality. Output ONLY English text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("vi", "en"): (
+        "<|im_start|>system\n"
+        "You are a professional Vietnamese-to-English translator. "
+        "Preserve meaning exactly, including eligibility, deadline, and requirement details. "
+        "Use natural, clear English. Output ONLY English text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("th", "en"): (
+        "<|im_start|>system\n"
+        "You are a professional Thai-to-English translator. "
+        "Maintain accuracy for official terms and procedural steps. "
+        "Keep register aligned with the source. Output ONLY English text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("ta", "en"): (
+        "<|im_start|>system\n"
+        "You are a professional Tamil-to-English translator. "
+        "Preserve exact intent and institutional terminology. "
+        "Do not add or omit meaning. Output ONLY English text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("en", "zh"): (
+        "<|im_start|>system\n"
+        "You are a professional English-to-Chinese translator. "
+        "Translate into clear modern Chinese, preserving policy/legal nuance and process details. "
+        "Keep official names precise. Output ONLY Chinese text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("en", "ms"): (
+        "<|im_start|>system\n"
+        "You are a professional English-to-Bahasa Melayu translator. "
+        "Use natural Malaysian Malay while preserving official terminology and requirements. "
+        "Output ONLY Bahasa Melayu text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("en", "vi"): (
+        "<|im_start|>system\n"
+        "You are a professional English-to-Vietnamese translator. "
+        "Keep details exact, especially conditions, dates, and application steps. "
+        "Output ONLY Vietnamese text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("en", "th"): (
+        "<|im_start|>system\n"
+        "You are a professional English-to-Thai translator. "
+        "Translate faithfully with natural Thai phrasing and accurate official terms. "
+        "Output ONLY Thai text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+    ("en", "ta"): (
+        "<|im_start|>system\n"
+        "You are a professional English-to-Tamil translator. "
+        "Preserve exact meaning and administrative terminology with natural Tamil wording. "
+        "Output ONLY Tamil text.\n"
+        "<|im_end|>\n"
+        "<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    ),
+}
 
 ASSISTANT_PROMPT_TEMPLATE = (
     "<|im_start|>system\n"

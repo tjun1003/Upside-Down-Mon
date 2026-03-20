@@ -34,6 +34,7 @@ from translation_config import (
     SOFT_MAX_TRANSLATION_TOKENS,
     STREAM_CHUNK_DELAY,
     TRANSLATION_PROMPT_TEMPLATE,
+    TRANSLATION_PROMPT_TEMPLATES,
     TRANSLATION_CACHE_SIZE,
     USE_ATLAS_KB,
     USE_KB,
@@ -239,6 +240,9 @@ class TranslationEngine:
         full_text = text
         if context:
             full_text = f"[Reference]\n{context}\n\n[Text to translate]\n{text}"
+        pair_template = TRANSLATION_PROMPT_TEMPLATES.get((src_lang, tgt_lang))
+        if pair_template is not None:
+            return pair_template.format(text=full_text)
         return TRANSLATION_PROMPT_TEMPLATE.format(src_name=src_name, tgt_name=tgt_name, text=full_text)
 
     def _build_assistant_prompt(self, message: str, target_lang: str, context: str = "") -> str:
