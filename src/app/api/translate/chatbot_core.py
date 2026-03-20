@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage
 
 from language_tools import LanguageDetector
 from translation_config import (
+    ASSISTANT_PROMPT_TEMPLATE,
     ASSISTANT_MAX_NEW_TOKENS,
     ATLAS_COLLECTION_NAME,
     ATLAS_DB_NAME,
@@ -24,7 +25,6 @@ from translation_config import (
     ATLAS_URI,
     ATLAS_USE_VECTOR_SEARCH,
     ATLAS_VECTOR_INDEX,
-    CHAT_PROMPTS,
     LAZY_LOAD_MODEL,
     LANG_NAMES,
     LOCAL_MODELS,
@@ -33,6 +33,7 @@ from translation_config import (
     SOFT_MAX_ASSISTANT_TOKENS,
     SOFT_MAX_TRANSLATION_TOKENS,
     STREAM_CHUNK_DELAY,
+    TRANSLATION_PROMPT_TEMPLATE,
     TRANSLATION_CACHE_SIZE,
     USE_ATLAS_KB,
     USE_KB,
@@ -232,56 +233,20 @@ class TranslationEngine:
         if len(self._cache) > TRANSLATION_CACHE_SIZE:
             self._cache.popitem(last=False)
 
-    def _build_prompt(self, text: str, src_lang: str, tgt_lang: str, context: str = "", fmt: str = "chatml") -> str:
+    def _build_prompt(self, text: str, src_lang: str, tgt_lang: str, context: str = "") -> str:
         src_name = LANG_NAMES.get(src_lang, src_lang)
         tgt_name = LANG_NAMES.get(tgt_lang, tgt_lang)
         full_text = text
         if context:
             full_text = f"[Reference]\n{context}\n\n[Text to translate]\n{text}"
-        return CHAT_PROMPTS[fmt].format(src_name=src_name, tgt_name=tgt_name, text=full_text)
+        return TRANSLATION_PROMPT_TEMPLATE.format(src_name=src_name, tgt_name=tgt_name, text=full_text)
 
     def _build_assistant_prompt(self, message: str, target_lang: str, context: str = "") -> str:
-        tgt_name = LANG_NAMES.get(target_lang, target_lang)
+        _ = target_lang  # kept for backward compatibility with existing call sites
         context_block = ""
         if context:
             context_block = f"<official_context>\n{context}\n</official_context>\n\n"
-
-        return (
-            "<|im_start|>system\n"
-            "You are CitizenAI, a warm and knowledgeable government services assistant - like a helpful friend who works in the civil service. "
-            f"Always respond in {tgt_name}, matching the user's register (formal if they are formal, casual if they are casual).\n\n"
-            "## Conversation Style\n"
-            "- Speak directly to the user in a natural, human tone - not like a FAQ page or official document.\n"
-            "- For greetings, small talk, or emotional messages: respond conversationally, warmly, and briefly.\n"
-            "- Never give robotic, bullet-point-only responses unless the user explicitly asks for a list.\n"
-            "- Never analyze or paraphrase the user's message back to them.\n\n"
-            "- Do not repeat or restate the user's question before answering.\n\n"
-            "- Do not output internal analysis, translation notes, or language explanations unless explicitly asked.\n"
-            "- Do not paste raw retrieval snippets, bracketed source IDs (like [1], [2]), or metadata fields.\n\n"
-            "## When Answering Government / Service Questions\n"
-            "- Lead with the most useful, direct answer first - then add context if needed.\n"
-            "- Break complex processes into simple numbered steps when there are multiple actions required.\n"
-            "- If a relevant official link, portal, or hotline exists, include it naturally in the response "
-            "(e.g. 'You can apply directly at [MyEG portal](https://www.myeg.com.my) - it usually takes about 10 minutes.').\n"
-            "- Acknowledge if something varies by state, citizenship status, or situation, and ask a clarifying question if needed.\n"
-            "- Never hallucinate links, fees, deadlines, or policy details. If unsure, say so and point to the right authority.\n\n"
-            "## Proactive Guidance\n"
-            "- After answering, anticipate what the user likely needs to know next and offer it naturally "
-            "(e.g. 'While you're at it, you'll probably also need to...', or 'One thing people often miss is...').\n"
-            "- End with ONE short follow-up question or suggestion that moves the user forward "
-            "(e.g. 'Would you like to know what documents you need to bring?', or 'Are you applying as a first-time applicant?').\n"
-            "- Do not ask multiple questions at once. Pick the single most useful one.\n\n"
-            "## Boundaries\n"
-            "- Do not give legal advice - refer to a lawyer or legal aid if needed.\n"
-            "- Do not speculate on politically sensitive matters.\n"
-            "- If a question is completely outside government services scope, acknowledge it briefly and redirect.\n"
-            "<|im_end|>\n"
-            "<|im_start|>user\n"
-            f"{context_block}"
-            f"{message}\n"
-            "<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+        return ASSISTANT_PROMPT_TEMPLATE.format(context_block=context_block, message=message)
 
     def generate_assistant_reply(self, message: str, target_lang: str, context: str = "") -> str:
         self.ensure_model_loaded()
@@ -304,7 +269,7 @@ class TranslationEngine:
         if cached is not None:
             return cached
 
-        prompt = self._build_prompt(text, src_lang, tgt_lang, context, fmt="chatml")
+        prompt = self._build_prompt(text, src_lang, tgt_lang, context)
         max_new_tokens = self._estimate_max_new_tokens(text)
 
         if self._model and self._tokenizer:
@@ -336,7 +301,7 @@ class TranslationEngine:
         try:
             from transformers import TextIteratorStreamer
 
-            prompt = self._build_prompt(text, src_lang, tgt_lang, context, fmt="chatml")
+            prompt = self._build_prompt(text, src_lang, tgt_lang, context)
             max_new_tokens = self._estimate_max_new_tokens(text)
             inputs = self._tokenizer(prompt, return_tensors="pt")
             if self._device == "cpu":

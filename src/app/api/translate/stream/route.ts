@@ -18,7 +18,13 @@ type StreamingFetchInit = RequestInit & {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { message, target_lang = 'auto', session_id = 'default', assistant_mode = true } = body
+    const {
+      message,
+      target_lang = 'auto',
+      session_id = 'default',
+      assistant_mode = true,
+      independent_langs,
+    } = body
 
     if (!message?.trim()) {
       return NextResponse.json(
@@ -37,6 +43,7 @@ export async function POST(request: NextRequest) {
         message,
         target_lang,
         assistant_mode,
+        independent_langs,
       }),
       cache: 'no-store',
       dispatcher: streamDispatcher,

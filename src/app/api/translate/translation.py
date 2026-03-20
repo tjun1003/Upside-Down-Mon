@@ -12,6 +12,7 @@ Core logic is split into smaller modules:
 import asyncio
 import json
 import os
+import re
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -23,10 +24,7 @@ from chatbot_core import SEAChatbot, log_cache_status, setup_telegram
 from language_tools import (
     build_assistant_reply,
     infer_lang_by_script,
-    is_off_topic_message,
-    needs_language_correction,
     resolve_response_lang,
-    sanitize_assistant_output,
 )
 from rag_service import RAGService
 from translation_config import (
@@ -35,9 +33,9 @@ from translation_config import (
     ATLAS_RAG_TOP_K,
     ATLAS_TEXT_FIELD,
     LANG_NAMES,
+    MULTI_OUTPUT_LANGS,
     STARTUP_CHECK_CACHE,
     STREAM_CHUNK_DELAY,
-    SYSTEM_SCOPE_REDIRECT_EN,
     USE_ATLAS_KB,
     UVICORN_RELOAD,
     logger,
@@ -91,6 +89,59 @@ rag_service = RAGService(
 )
 
 
+def summarize_for_rag(english_text: str, max_chars: int = 420) -> str:
+    """Build a compact English retrieval query from long user text."""
+    text = re.sub(r"\s+", " ", english_text or "").strip()
+    if not text:
+        return ""
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if not sentences:
+        return text[:max_chars]
+
+    # Keep the lead sentence and one informative sentence for better recall.
+    lead = sentences[0]
+    best = ""
+    for s in sentences[1:]:
+        if len(s) > len(best):
+            best = s
+
+    summary = lead if not best else f"{lead} {best}"
+    summary = re.sub(r"\s+", " ", summary).strip()
+    if len(summary) > max_chars:
+        summary = summary[:max_chars].rsplit(" ", 1)[0].strip()
+
+    return summary or text[:max_chars]
+
+
+def build_independent_translations(
+    base_text: str,
+    base_lang: str = "en",
+    target_langs_override: list[str] | None = None,
+) -> dict[str, str]:
+    """Translate one source text into multiple target languages independently."""
+    results: dict[str, str] = {}
+    source = (base_text or "").strip()
+    if not source:
+        return results
+
+    target_langs = [lang for lang in (target_langs_override or MULTI_OUTPUT_LANGS) if lang]
+    if not target_langs:
+        target_langs = ["en", "zh", "ms", "id"]
+
+    for lang in target_langs:
+        try:
+            if lang == base_lang:
+                results[lang] = source
+            else:
+                translated = chatbot.engine.translate(source, base_lang, lang, "")
+                results[lang] = translated
+        except Exception as exc:
+            logger.warning(f"Independent translation failed for {lang}: {exc}")
+
+    return results
+
+
 async def persist_conversation(session_id: str, message: str, reply: str) -> None:
     """Persist chat messages to Mongo when available; fallback to in-memory store."""
     global mongo_conversation_store
@@ -132,9 +183,12 @@ async def chat_stream(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(400, "Message cannot be empty")
 
-    detection = chatbot.detector.detect_with_confidence(req.message)
+    message = req.message
+    logger.info(f"chat_stream: session={req.session_id}, assistant_mode={req.assistant_mode}")
+
+    detection = chatbot.detector.detect_with_confidence(message)
     src_lang = detection["lang"]
-    script_lang = infer_lang_by_script(req.message)
+    script_lang = infer_lang_by_script(message)
     if script_lang is not None:
         src_lang = script_lang
 
@@ -144,7 +198,7 @@ async def chat_stream(req: ChatRequest):
         response_lang = script_lang
     elif auto_mode and src_lang == "en" and float(detection.get("confidence", 0.0)) < 0.2:
         # If detection is very uncertain and input contains non-ASCII chars, prefer Chinese for UX.
-        has_non_ascii = any(ord(ch) > 127 for ch in req.message)
+        has_non_ascii = any(ord(ch) > 127 for ch in message)
         response_lang = "zh" if has_non_ascii else "en"
     else:
         response_lang = resolve_response_lang(src_lang, req.target_lang)
@@ -169,80 +223,74 @@ async def chat_stream(req: ChatRequest):
         )
         yield f"data: {meta}\n\n"
 
-        context = chatbot.kb.retrieve(req.message) if chatbot.kb.ready else ""
-
         if req.assistant_mode:
-            if is_off_topic_message(req.message):
-                if response_lang == "en":
-                    final_reply = SYSTEM_SCOPE_REDIRECT_EN
-                else:
-                    final_reply = chatbot.engine.translate(
-                        SYSTEM_SCOPE_REDIRECT_EN,
-                        "en",
-                        response_lang,
-                        "",
-                    )
-                final_reply = sanitize_assistant_output(final_reply)
-
-                if not final_reply.strip():
-                    if response_lang == "zh":
-                        final_reply = EMPTY_ASSISTANT_FALLBACK_ZH
-                    elif response_lang == "en":
-                        final_reply = EMPTY_ASSISTANT_FALLBACK_EN
-                    else:
-                        final_reply = chatbot.engine.translate(
-                            EMPTY_ASSISTANT_FALLBACK_EN,
-                            "en",
-                            response_lang,
-                            "",
-                        )
-                    final_reply = sanitize_assistant_output(final_reply)
-                    if not final_reply.strip():
-                        final_reply = EMPTY_ASSISTANT_FALLBACK_EN
-
-                async for event in emit_text_as_tokens(final_reply):
-                    yield event
-                await persist_conversation(req.session_id, req.message, final_reply)
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
-
-            rule_reply_en = build_assistant_reply(req.message)
+            rule_reply_en = build_assistant_reply(message)
             if rule_reply_en is not None:
-                if response_lang == "en":
-                    final_reply = rule_reply_en
-                else:
-                    final_reply = chatbot.engine.translate(
-                        rule_reply_en,
-                        "en",
-                        response_lang,
-                        "",
-                    )
+                english_reply = rule_reply_en
             else:
-                final_reply = chatbot.engine.generate_assistant_reply(
-                    req.message,
-                    response_lang,
-                    context,
+                # Pipeline:
+                # user(any lang) -> EN normalize -> EN summary -> internal RAG -> external web fallback -> EN generation
+                pivot_en = message
+                if src_lang != "en":
+                    logger.info(f"Assistant pipeline: translating source {src_lang} -> en")
+                    pivot_en = chatbot.engine.translate(message, src_lang, "en", "")
+                    if not pivot_en.strip() or pivot_en.startswith("["):
+                        pivot_en = message
+
+                summary_en = summarize_for_rag(pivot_en)
+                rag_query_en = summary_en or pivot_en
+
+                logger.info("Assistant pipeline: retrieving RAG context")
+                raw_context = await rag_service.retrieve_context(rag_query_en)
+                context_en = raw_context
+                if raw_context.strip():
+                    context_lang = chatbot.detector.detect(raw_context)
+                    if context_lang != "en":
+                        logger.info(f"Assistant pipeline: translating context {context_lang} -> en")
+                        translated_context = chatbot.engine.translate(raw_context, context_lang, "en", "")
+                        if translated_context.strip() and not translated_context.startswith("["):
+                            context_en = translated_context
+
+                # Keep generation in English and markdown-friendly.
+                generation_prompt_en = (
+                    f"User request (English normalized):\n{pivot_en}\n\n"
+                    f"Retrieval summary for search:\n{rag_query_en}\n\n"
+                    "Please answer in English using clean Markdown (headings/lists/table when useful). "
+                    "Give direct guidance first, then practical next steps."
+                )
+                english_reply = chatbot.engine.generate_assistant_reply(
+                    generation_prompt_en,
+                    "en",
+                    context_en,
                 )
 
-            final_reply = sanitize_assistant_output(final_reply)
-            out_lang = chatbot.detector.detect(final_reply)
-            if out_lang != response_lang and final_reply.strip():
-                final_reply = chatbot.engine.translate(
-                    final_reply,
-                    out_lang,
-                    response_lang,
-                    "",
-                )
-                final_reply = sanitize_assistant_output(final_reply)
+            if not english_reply.strip():
+                english_reply = EMPTY_ASSISTANT_FALLBACK_EN
 
-            if needs_language_correction(final_reply, response_lang):
+            override_langs = req.independent_langs if req.independent_langs else None
+            translations = build_independent_translations(
+                english_reply,
+                base_lang="en",
+                target_langs_override=override_langs,
+            )
+            translations_event = json.dumps({"type": "translations", "data": translations})
+            yield f"data: {translations_event}\n\n"
+
+            # Final output should follow the user's input language.
+            final_output_lang = src_lang if src_lang in LANG_NAMES else response_lang
+            if final_output_lang == "en":
+                final_reply = english_reply
+            else:
                 final_reply = chatbot.engine.translate(
-                    final_reply,
-                    chatbot.detector.detect(final_reply),
-                    response_lang,
+                    english_reply,
+                    "en",
+                    final_output_lang,
                     "",
                 )
-                final_reply = sanitize_assistant_output(final_reply)
+            logger.info(
+                "Assistant pipeline: final output translated to user language, "
+                f"lang={final_output_lang}"
+            )
 
             if not final_reply.strip():
                 if response_lang == "zh":
@@ -256,7 +304,6 @@ async def chat_stream(req: ChatRequest):
                         response_lang,
                         "",
                     )
-                final_reply = sanitize_assistant_output(final_reply)
                 if not final_reply.strip():
                     final_reply = EMPTY_ASSISTANT_FALLBACK_EN
 
@@ -264,17 +311,17 @@ async def chat_stream(req: ChatRequest):
                 yield event
         else:
             async for token in chatbot.engine.translate_stream(
-                req.message,
+                message,
                 src_lang,
                 req.target_lang,
-                context,
+                "",
             ):
                 payload = json.dumps({"type": "token", "text": token})
                 yield f"data: {payload}\n\n"
                 await asyncio.sleep(0)
-            final_reply = chatbot.engine.translate(req.message, src_lang, req.target_lang, context)
+            final_reply = chatbot.engine.translate(message, src_lang, req.target_lang, "")
 
-        await persist_conversation(req.session_id, req.message, final_reply)
+        await persist_conversation(req.session_id, message, final_reply)
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
