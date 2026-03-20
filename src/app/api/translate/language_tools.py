@@ -5,10 +5,8 @@ from langdetect import detect, detect_langs
 
 from translation_config import (
     ASSISTANT_RESPONSES,
-    DOMAIN_KEYWORDS,
     LANG_MAP,
     LANG_NAMES,
-    OFF_TOPIC_KEYWORDS,
 )
 
 
@@ -47,27 +45,6 @@ def resolve_response_lang(detected_lang: str, requested_lang: str) -> str:
         return requested
 
     return "en"
-
-
-def is_off_topic_message(message: str) -> bool:
-    lower = message.lower().strip()
-    if not lower:
-        return False
-
-    if any(k in lower for k in DOMAIN_KEYWORDS):
-        return False
-
-    if any(k in lower for k in OFF_TOPIC_KEYWORDS):
-        return True
-
-    token_count = len(re.findall(r"\w+", lower, flags=re.UNICODE))
-    has_cjk = bool(re.search(r"[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]", lower))
-
-    # Keep this short-message off-topic heuristic for latin-script chatty prompts only.
-    if token_count <= 4 and not has_cjk and not any(k in lower for k in DOMAIN_KEYWORDS):
-        return True
-
-    return False
 
 
 def infer_lang_by_script(text: str) -> Optional[str]:

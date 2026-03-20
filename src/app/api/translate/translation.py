@@ -23,7 +23,6 @@ from app_models import ChatRequest, ClearRequest, DetectRequest, KBAddRequest
 from chatbot_core import SEAChatbot, log_cache_status, setup_telegram
 from language_tools import (
     build_assistant_reply,
-    infer_lang_by_script,
     resolve_response_lang,
 )
 from rag_service import RAGService
@@ -188,19 +187,7 @@ async def chat_stream(req: ChatRequest):
 
     detection = chatbot.detector.detect_with_confidence(message)
     src_lang = detection["lang"]
-    script_lang = infer_lang_by_script(message)
-    if script_lang is not None:
-        src_lang = script_lang
-
-    # In auto mode, prioritize the visible script in user input to keep language aligned.
-    auto_mode = (req.target_lang or "auto").strip().lower() == "auto"
-    if auto_mode and script_lang is not None:
-        response_lang = script_lang
-    elif auto_mode and src_lang == "en" and float(detection.get("confidence", 0.0)) < 0.2:
-        has_non_ascii = any(ord(ch) > 127 for ch in message)
-        response_lang = "zh" if has_non_ascii else "en"
-    else:
-        response_lang = resolve_response_lang(src_lang, req.target_lang)
+    response_lang = resolve_response_lang(src_lang, req.target_lang)
 
     async def emit_text_as_tokens(text: str):
         for chunk in text.split(" "):
@@ -263,14 +250,14 @@ async def chat_stream(req: ChatRequest):
             if not english_reply.strip():
                 english_reply = EMPTY_ASSISTANT_FALLBACK_EN
 
-            override_langs = req.independent_langs if req.independent_langs else None
-            translations = build_independent_translations(
-                english_reply,
-                base_lang="en",
-                target_langs_override=override_langs,
-            )
-            translations_event = json.dumps({"type": "translations", "data": translations})
-            yield f"data: {translations_event}\n\n"
+            if req.independent_langs:
+                translations = build_independent_translations(
+                    english_reply,
+                    base_lang="en",
+                    target_langs_override=req.independent_langs,
+                )
+                translations_event = json.dumps({"type": "translations", "data": translations})
+                yield f"data: {translations_event}\n\n"
 
             final_output_lang = src_lang if src_lang in LANG_NAMES else response_lang
             if final_output_lang == "en":

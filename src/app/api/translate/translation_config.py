@@ -58,26 +58,6 @@ MULTI_OUTPUT_LANGS = [
     if l.strip()
 ]
 
-LANG_MAP = {
-    "zh-cn": "zh", "zh-tw": "zh", "zh": "zh",
-    "ms": "ms", "id": "id", "th": "th",
-    "vi": "vi", "tl": "tl", "my": "my",
-    "ta": "ta", "km": "km", "lo": "lo",
-    "en": "en", "ja": "ja", "ko": "ko",
-    "fr": "fr", "de": "de", "es": "es",
-    "ar": "ar",
-}
-
-LANG_NAMES = {
-    "en": "English", "ms": "Bahasa Melayu",
-    "id": "Bahasa Indonesia", "th": "Thai",
-    "vi": "Vietnamese", "zh": "Chinese",
-    "ta": "Tamil", "tl": "Filipino",
-    "my": "Burmese", "km": "Khmer",
-    "lo": "Lao", "ja": "Japanese",
-    "ko": "Korean",
-}
-
 ASSISTANT_RESPONSES = {
     "greeting": (
         "Hello. I am doing well, thank you for asking. "
@@ -86,56 +66,8 @@ ASSISTANT_RESPONSES = {
     "affection": (
         "Thank you for saying that. That is very kind of you. "
         "I am here with you. What would you like to talk about next?"
-    ),
-    "subsidy": (
-        "Hospital subsidies are available under the Skim Peduli Kesihatan programme. "
-        "To apply: (1) Register at MySejahtera portal, (2) Upload your IC and income documents, "
-        "(3) Visit any government clinic for assessment. The process takes 5 to 7 working days."
-    ),
-    "scholarship": (
-        "Several scholarships are available: JPA Scholarship (full tuition), MARA Loans "
-        "(low-interest), and State Education Bursaries. Eligibility depends on household "
-        "income and academic results. Which education level is your child in?"
-    ),
-    "housing": (
-        "Affordable housing programmes include PR1MA for middle income, PPR Rental for low "
-        "income, and MyDeposit for first-home buyers. Apply online at ehome.kpkt.gov.my. "
-        "What is your household income range?"
-    ),
-    "grant": (
-        "Great question. For most government grant applications, the fastest path is to prepare these first: "
-        "(1) company profile and registration documents, (2) latest financial statements, "
-        "(3) project proposal with budget and timeline, and (4) expected outcomes (jobs, productivity, digital adoption). "
-        "Then check eligibility criteria on the official portal and submit before the closing date. "
-        "If you tell me your sector and company size, I can narrow this down to the most relevant scheme and checklist for you."
-    ),
-    "legal": (
-        "As a migrant worker you have the right to fair wages, safe working conditions, "
-        "healthcare access, and the right to file complaints with JTKSM. "
-        "Call the Labour Hotline: 1800-88-8088 (free). Would you like this in another language?"
-    ),
+    )
 }
-
-SYSTEM_SCOPE_REDIRECT_EN = (
-    "I can only assist with government service topics: public health support, education and scholarships, "
-    "housing assistance, and basic worker/legal rights. "
-    "Please ask a related question so I can help you directly."
-)
-
-DOMAIN_KEYWORDS = [
-    "health", "hospital", "subsidy", "clinic", "医保", "医疗", "医院", "补助", "补贴",
-    "education", "school", "scholarship", "study", "学历", "教育", "奖学金",
-    "grant", "fund", "funding", "基金", "资助", "補助金", "拨款", "撥款", "申请", "申請",
-    "housing", "rent", "home", "house", "房屋", "住房", "租房", "买房",
-    "legal", "right", "rights", "contract", "labour", "labor", "worker", "migrant",
-    "法律", "权益", "合同", "工人", "劳工", "勞工", "签证", "簽證",
-]
-
-OFF_TOPIC_KEYWORDS = [
-    "i love you", "i like you", "do you love me", "you love who", "kiss", "date", "girlfriend", "boyfriend",
-    "我爱你", "我愛你", "我喜欢你", "你爱谁", "你愛誰", "谈恋爱", "談戀愛",
-    "cook", "make food", "make me dinner", "做饭", "做飯", "煮饭", "煮飯",
-]
 
 TRANSLATION_PROMPT_TEMPLATE = (
     "<|im_start|>system\n"
