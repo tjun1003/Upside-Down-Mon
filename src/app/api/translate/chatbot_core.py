@@ -468,6 +468,8 @@ class KnowledgeBase:
 
     def _atlas_format_context(self, docs: List[Dict[str, Any]]) -> str:
         chunks: List[str] = []
+        logger.info(f"📚 RAG: Found {len(docs)} document(s) from Atlas KB")
+        
         for idx, doc in enumerate(docs, 1):
             text = str(doc.get(ATLAS_TEXT_FIELD, "")).strip()
             if not text:
@@ -478,6 +480,11 @@ class KnowledgeBase:
             score = ""
             if isinstance(score_raw, (float, int)):
                 score = f" (score: {score_raw:.4f})"
+
+            # Log each document's information
+            text_preview = text[:100].replace('\n', ' ') + ('...' if len(text) > 100 else '')
+            logger.info(f"  [{idx}] {source}{score}")
+            logger.info(f"       Content: {text_preview}")
 
             prefix = f"[{idx}]"
             if source:
@@ -507,9 +514,12 @@ class KnowledgeBase:
             return ""
 
         limit = max(1, min(top_k, 10))
+        logger.info(f"🔍 RAG: Query: '{query}' (limit={limit})")
 
+        # Try vector search first
         if self._atlas_use_vector and self._atlas_embedder is not None:
             try:
+                logger.info(f"🔍 RAG: Attempting vector search using index '{ATLAS_VECTOR_INDEX}'...")
                 query_vector = self._atlas_embedder.get_text_embedding(query)
                 pipeline = [
                     {
@@ -532,18 +542,28 @@ class KnowledgeBase:
                 ]
                 docs = list(self._atlas_collection.aggregate(pipeline))
                 if docs:
+                    logger.info(f"✅ RAG: Vector search successful! Retrieved {len(docs)} document(s)")
                     return self._atlas_format_context(docs)
+                else:
+                    logger.info(f"❌ RAG: Vector search returned no results")
             except Exception as exc:
-                logger.warning(f"Atlas vector retrieval failed, fallback to keyword search: {exc}")
+                logger.warning(f"⚠️  RAG: Vector retrieval failed, fallback to keyword search: {exc}")
 
+        # Fallback to keyword search
         try:
+            logger.info(f"🔍 RAG: Attempting keyword search...")
             projection = {"_id": 0, ATLAS_TEXT_FIELD: 1, ATLAS_SOURCE_FIELD: 1}
-            docs = list(self._atlas_collection.find(self._atlas_keyword_query(query), projection).limit(limit))
+            query_obj = self._atlas_keyword_query(query)
+            docs = list(self._atlas_collection.find(query_obj, projection).limit(limit))
             if docs:
+                logger.info(f"✅ RAG: Keyword search successful! Retrieved {len(docs)} document(s)")
                 return self._atlas_format_context(docs)
+            else:
+                logger.info(f"❌ RAG: Keyword search returned no results")
         except Exception as exc:
-            logger.warning(f"Atlas keyword retrieval failed: {exc}")
+            logger.warning(f"⚠️  RAG: Keyword retrieval failed: {exc}")
 
+        logger.info(f"❌ RAG: No documents found for query")
         return ""
 
     def _setup(self) -> None:
@@ -614,18 +634,41 @@ class KnowledgeBase:
         logger.info(f"Added {len(docs)} documents to knowledge base")
 
     def retrieve(self, query: str, top_k: int = ATLAS_RAG_TOP_K) -> str:
+        if not query.strip():
+            return ""
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"RAG RETRIEVAL STARTED")
+        logger.info(f"{'='*60}")
+        logger.info(f"Query: '{query}'")
+        
         atlas_context = self._atlas_retrieve(query, top_k=top_k)
         if atlas_context:
+            logger.info(f"\n✅ RAG Context prepared successfully")
+            logger.info(f"{'='*60}\n")
             return atlas_context
-
+        
+        logger.info(f"\n⚠️  Falling back to local knowledge base...")
         if not self.enabled or self._index is None:
+            logger.info(f"❌ Local KB not available")
+            logger.info(f"{'='*60}\n")
             return ""
 
         try:
             retriever = self._index.as_retriever(similarity_top_k=top_k)
             nodes = retriever.retrieve(query)
-            return "\n---\n".join(n.text for n in nodes)
-        except Exception:
+            if nodes:
+                logger.info(f"✅ Local KB: Found {len(nodes)} document(s)")
+                context = "\n---\n".join(n.text for n in nodes)
+                logger.info(f"{'='*60}\n")
+                return context
+            else:
+                logger.info(f"❌ Local KB: No documents found")
+                logger.info(f"{'='*60}\n")
+                return ""
+        except Exception as exc:
+            logger.warning(f"Local KB retrieval error: {exc}")
+            logger.info(f"{'='*60}\n")
             return ""
 
     @property

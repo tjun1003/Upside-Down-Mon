@@ -128,6 +128,11 @@ async def chat_stream(req: ChatRequest):
         yield f"data: {meta}\n\n"
 
         context = chatbot.kb.retrieve(req.message) if chatbot.kb.ready else ""
+        if context:
+            logger.info(f"\n📌 USING RAG CONTEXT FOR RESPONSE")
+            logger.info(f"Context length: {len(context)} characters")
+        else:
+            logger.info(f"\n⚠️  NO RAG CONTEXT - Using default knowledge")
 
         if req.assistant_mode:
             if is_off_topic_message(req.message):
