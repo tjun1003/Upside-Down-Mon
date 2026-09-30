@@ -3,5 +3,7 @@
     "builder.command": "npm run dev",
     "builder.runDevServer": false,
     "builder.autoDetectDevServer": true,
-    "builder.launchType": "editor"
+    "builder.launchType": "editor",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

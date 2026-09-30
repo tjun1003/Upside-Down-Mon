@@ -10,8 +10,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import HumanMessage
 
-from language_tools import LANG_NAMES, LanguageDetector
-from translation_config import (
+from libs.language_tools import LANG_NAMES, LanguageDetector
+from config.settings import (
     ASSISTANT_PROMPT_TEMPLATE,
     ASSISTANT_MAX_NEW_TOKENS,
     ATLAS_COLLECTION_NAME,
@@ -31,8 +31,10 @@ from translation_config import (
     MODEL_QUANTIZATION,
     SOFT_MAX_ASSISTANT_TOKENS,
     SOFT_MAX_TRANSLATION_TOKENS,
+    SUMMARY_EN_TO_MS_PROMPT_TEMPLATE,
+    SUMMARY_PROMPT_TEMPLATE,
     STREAM_CHUNK_DELAY,
-    TRANSLATION_PROMPT_TEMPLATE,
+    # TRANSLATION_PROMPT_TEMPLATE,  # Removed generic template
     TRANSLATION_PROMPT_TEMPLATES,
     TRANSLATION_CACHE_SIZE,
     USE_ATLAS_KB,
@@ -199,7 +201,14 @@ class TranslationEngine:
         if self._tokenizer is None or self._model is None:
             return "[Translation unavailable - model not loaded]"
 
-        inputs = self._tokenizer(prompt, return_tensors="pt")
+        model_max_length = getattr(self._tokenizer, "model_max_length", 4096)
+        safe_max_length = min(int(model_max_length), 4096)
+        inputs = self._tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=safe_max_length,
+        )
         if self._device == "cpu":
             inputs = {key: value.to(self._device) for key, value in inputs.items()}
 
@@ -242,7 +251,8 @@ class TranslationEngine:
         pair_template = TRANSLATION_PROMPT_TEMPLATES.get((src_lang, tgt_lang))
         if pair_template is not None:
             return pair_template.format(text=full_text)
-        return TRANSLATION_PROMPT_TEMPLATE.format(src_name=src_name, tgt_name=tgt_name, text=full_text)
+        # Raise exception or return empty string when no matching template
+        raise ValueError(f"No translation prompt template for language pair: {src_lang} -> {tgt_lang}")
 
     def _build_assistant_prompt(self, message: str, target_lang: str, context: str = "") -> str:
         _ = target_lang  # kept for backward compatibility with existing call sites
@@ -264,6 +274,34 @@ class TranslationEngine:
         except Exception as exc:
             logger.error(f"Assistant generation error: {exc}")
             return "I can help, but I hit an internal generation error. Please try again."
+
+    def summarize_for_retrieval_en(self, text: str) -> str:
+        self.ensure_model_loaded()
+        source = (text or "").strip()
+        if not source:
+            return ""
+        prompt = SUMMARY_PROMPT_TEMPLATE.format(text=source)
+        max_new_tokens = min(192, max(48, len(source) // 3))
+        try:
+            summary = self._clean_translation(self._generate_text(prompt, max_new_tokens))
+            return re.sub(r"\s+", " ", summary).strip()
+        except Exception as exc:
+            logger.warning(f"Summary generation failed: {exc}")
+            return ""
+
+    def translate_summary_en_to_ms(self, summary_en: str) -> str:
+        self.ensure_model_loaded()
+        source = (summary_en or "").strip()
+        if not source:
+            return ""
+        prompt = SUMMARY_EN_TO_MS_PROMPT_TEMPLATE.format(text=source)
+        max_new_tokens = min(256, max(48, len(source) * 2))
+        try:
+            translated = self._clean_translation(self._generate_text(prompt, max_new_tokens))
+            return re.sub(r"\s+", " ", translated).strip()
+        except Exception as exc:
+            logger.warning(f"Summary en->ms translation failed: {exc}")
+            return ""
 
     def translate(self, text: str, src_lang: str, tgt_lang: str, context: str = "") -> str:
         self.ensure_model_loaded()

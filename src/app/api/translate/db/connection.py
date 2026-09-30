@@ -5,6 +5,7 @@ Provides:
 - `init_mongo(app)` / `close_mongo(app)` to manage a Motor client on FastAPI app.state
 - `MongoConversationStore` — optimized async store for messages with batch operations
 - `MongoKnowledgeBase` — efficient KB document persistence with query optimization
+- GridFS integration — large file storage for original PDFs
 
 Optimizations:
 - Connection pool size tuned for concurrent requests
@@ -12,6 +13,7 @@ Optimizations:
 - Query projections to reduce network transfer
 - Efficient sorted queries with index hints
 - Graceful degradation when MongoDB unavailable
+- GridFS for efficient large file handling
 """
 from typing import List, Dict, Any, Optional
 import os
@@ -21,7 +23,7 @@ import logging
 from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
 
-logger = logging.getLogger(__name__)
+from config.settings import logger
 
 MONGODB_URI = os.getenv("MONGODB_URI", "")
 MONGODB_DB = os.getenv("MONGODB_DB", "sea_translate")
@@ -41,11 +43,14 @@ async def init_mongo(app: FastAPI) -> None:
     - maxPoolSize: 10 (handles ~8-10 concurrent requests)
     - maxIdleTimeMS: 45000 (recycle idle connections)
     - serverSelectionTimeoutMS: 5000 (fail fast on unavailability)
+    
+    Also initializes GridFS bucket for PDF storage.
     """
     if not MONGODB_URI:
         logger.warning("MONGODB_URI not set; MongoDB features disabled")
         app.state.mongodb_client = None
         app.state.mongodb = None
+        app.state.gridfs_bucket = None
         return
 
     try:
@@ -60,7 +65,15 @@ async def init_mongo(app: FastAPI) -> None:
         app.state.mongodb_client = client
         app.state.mongodb = client[MONGODB_DB]
         
+        # Initialize GridFS bucket
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+        app.state.gridfs_bucket = AsyncIOMotorGridFSBucket(
+            app.state.mongodb,
+            bucket_name="pdfs"
+        )
+        
         logger.info(f"MongoDB connected: {MONGODB_DB} (pool_size={MONGODB_POOL_SIZE})")
+        logger.info("GridFS bucket initialized: pdfs")
 
         try:
             await _create_indexes(app.state.mongodb)
@@ -72,6 +85,7 @@ async def init_mongo(app: FastAPI) -> None:
         logger.error(f"MongoDB connection failed: {e}", exc_info=True)
         app.state.mongodb_client = None
         app.state.mongodb = None
+        app.state.gridfs_bucket = None
 
 
 async def _create_indexes(db: Any) -> None:
